@@ -21,6 +21,7 @@ const ui = {
   toChat: false,
   startCat: null,
   sheetQuery: '',
+  query: '',
   startLat: null,
   startLng: null,
   onboarding: null
@@ -247,12 +248,14 @@ function cardHTML(g, preview = false) {
 }
 
 function filtered() {
+  const q = ui.query.trim().toLowerCase();
   const list = state.groups.filter(g =>
     (ui.cat === 'all' || g.cat === ui.cat) &&
     (ui.lang === 'any' || g.lang.includes(ui.lang)) &&
     (ui.dist === 'any' || g.distKm <= Number(ui.dist)) &&
     (!ui.friendsOnly || g.friendsOnly || friendCount(g) > 0) &&
-    (!ui.newHereOnly || newCount(g) > 0)
+    (!ui.newHereOnly || newCount(g) > 0) &&
+    (!q || g.name.toLowerCase().includes(q) || g.place.toLowerCase().includes(q) || g.desc.toLowerCase().includes(q))
   );
   if (ui.sort === 'suggested') {
     return list.sort((a, b) => (b.matchScore - a.matchScore) || (a.distKm - b.distKm));
@@ -280,6 +283,7 @@ function discoverView() {
       <button type="button" class="chip" data-act="toggle-new-here" data-key="f-new-here" aria-pressed="${ui.newHereOnly}">${svg('spark', 15)}New here</button>
     </div>
     <div class="tools">
+      <label class="search-wrap sr-only-label"><span class="sr-only">Search groups</span><input type="search" id="f-search" class="input search-input" placeholder="Search groups…" value="${esc(ui.query)}" data-key="f-search" autocomplete="off"></label>
       <label class="select"><span class="sr-only">Sort</span><select id="f-sort" data-filter="sort" data-key="f-sort">${opts([['suggested', 'Suggested for you'], ['closest', 'Closest first']], ui.sort)}</select></label>
       <label class="select"><span class="sr-only">Language</span><select id="f-lang" data-filter="lang" data-key="f-lang">${opts([['any', 'Any language'], ...LANGS.map(l => [l, l])], ui.lang)}</select></label>
       <label class="select"><span class="sr-only">Distance</span><select id="f-dist" data-filter="dist" data-key="f-dist">${opts([['any', 'Any distance'], ['1', 'Within 1 km'], ['2', 'Within 2 km'], ['3', 'Within 3 km']], ui.dist)}</select></label>
@@ -874,7 +878,7 @@ document.addEventListener('click', async e => {
       case 'pin': ui.pin = t.dataset.id; render(); break;
       case 'toggle-friends': ui.friendsOnly = !ui.friendsOnly; ui.pin = null; render(); break;
       case 'toggle-new-here': ui.newHereOnly = !ui.newHereOnly; ui.pin = null; render(); break;
-      case 'clear': ui.cat = 'all'; ui.lang = 'any'; ui.dist = 'any'; ui.friendsOnly = false; ui.newHereOnly = false; render(); break;
+      case 'clear': ui.cat = 'all'; ui.lang = 'any'; ui.dist = 'any'; ui.friendsOnly = false; ui.newHereOnly = false; ui.query = ''; render(); break;
       case 'start-with': ui.startCat = ui.cat !== 'all' ? ui.cat : null; break;
       case 'open-chat': ui.toChat = true; break;
       case 'profile': openProfileSheet(t.dataset.uid); break;
@@ -1079,6 +1083,13 @@ document.addEventListener('change', e => {
 });
 
 document.addEventListener('input', e => {
+  if (e.target.id === 'f-search') {
+    ui.query = e.target.value;
+    ui.pin = null;
+    render();
+    document.getElementById('f-search')?.focus();
+    return;
+  }
   if (e.target.closest('#start-form')) {
     if (e.target.setCustomValidity) e.target.setCustomValidity('');
     updatePreview();

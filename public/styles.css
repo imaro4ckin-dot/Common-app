@@ -122,6 +122,8 @@ main.wrap { padding-block: 32px 64px; outline: none; }
 /* Discover */
 .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin: 24px 0 18px; }
 .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.search-input { min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); font: 500 14px var(--font-body); width: 180px; }
+.search-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .discover { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 28px; align-items: start; }
 .result-line { color: var(--muted); font-size: 14px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .results { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
