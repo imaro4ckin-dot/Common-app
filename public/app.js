@@ -703,13 +703,34 @@ function route() {
 
 const main = document.getElementById('main');
 let lastKey = '';
+let pollTimer = null;
+
+function stopPoll() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+async function doPoll() {
+  mergeState(await api('/api/state'));
+  const r = route();
+  if (r.name === 'group' && isMember(r.g)) markSeen(r.g.id);
+}
 
 function render() {
   if (!state.me) return;
   const r = route();
   const key = r.name + (r.g ? r.g.id : '');
   const changed = key !== lastKey;
-  if (changed) { ui.leave = false; ui.plan = false; }
+  if (changed) {
+    ui.leave = false; ui.plan = false;
+    // start polling chat when inside a group, stop when leaving
+    if (r.name === 'group' && isMember(r.g)) {
+      stopPoll();
+      pollTimer = setInterval(doPoll, 10000);
+    } else {
+      stopPoll();
+    }
+  }
 
   const active = document.activeElement;
   const focusKey = !changed && active && active.dataset ? active.dataset.key : null;
