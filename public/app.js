@@ -57,6 +57,17 @@ const isPaused = g => g.pausedUntil && new Date(g.pausedUntil) > new Date();
 const isOnWaitlist = g => Array.isArray(g.waitlist) && g.waitlist.includes(state.me?.id);
 const getMemberMeta = (g, uid) => (g.membersMeta || []).find(m => m.userId === uid) || { weeksIn: 0, mutualFriends: 0 };
 
+// show how long ago a message was sent, like "2m ago" or "Mon 3 Nov"
+function relTime(ts) {
+  if (!ts) return '';
+  const diff = Date.now() - ts;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+  if (diff < 7 * 86400000) return fmt(new Date(ts), { weekday: 'short' });
+  return fmt(new Date(ts), { day: 'numeric', month: 'short' });
+}
+
 function isInRatingWindow(g) {
   const s = nextSession(g);
   const endTs = s.getTime() + g.duration * 60000;
@@ -291,14 +302,15 @@ function msgHTML(m, g) {
   const p = person(m.from);
   if (!p) return '';
   const me = m.from === state.me.id;
+  const timeStr = m.ts ? `<span class="msg-time">${relTime(m.ts)}</span>` : '';
   const who = me ? '' : `<div class="msg-name">${esc(p.name)}${m.from === g.host ? ' · host' : ''}</div>`;
   if (m.plan) {
     const ins = Array.isArray(m.ins) ? m.ins.filter(id => g.members.includes(id)) : [];
     const mine = ins.includes(state.me.id);
     return `<li class="msg${me ? ' msg-me' : ''}">${me ? '' : avatar(m.from)}<div>${who}<div class="plan"><span class="plan-k">${svg('spark', 14)}Extra plan</span><strong>${esc(m.plan.what)}</strong><span class="muted">${esc(m.plan.when)}</span>
-      <div class="plan-foot"><span class="stack">${ins.map(id => avatar(id)).join('')}</span><span class="muted">${ins.length} in</span><button type="button" class="btn btn-sm ${mine ? 'btn-going' : 'btn-secondary'}" data-act="plan-in" data-id="${g.id}" data-mid="${m.id}" data-key="plan-${m.id}" aria-pressed="${mine}">${mine ? svg('check', 14) : ''}I'm in</button></div></div></div></li>`;
+      <div class="plan-foot"><span class="stack">${ins.map(id => avatar(id)).join('')}</span><span class="muted">${ins.length} in</span><button type="button" class="btn btn-sm ${mine ? 'btn-going' : 'btn-secondary'}" data-act="plan-in" data-id="${g.id}" data-mid="${m.id}" data-key="plan-${m.id}" aria-pressed="${mine}">${mine ? svg('check', 14) : ''}I'm in</button></div></div>${timeStr}</div></li>`;
   }
-  return `<li class="msg${me ? ' msg-me' : ''}">${me ? '' : avatar(m.from)}<div>${who}<div class="bubble">${esc(m.text)}</div></div></li>`;
+  return `<li class="msg${me ? ' msg-me' : ''}">${me ? '' : avatar(m.from)}<div>${who}<div class="bubble">${esc(m.text)}</div>${timeStr}</div></li>`;
 }
 
 function isNearMeetup(g) {

@@ -381,16 +381,17 @@ export function getFullState(db, currentUserId = 'me') {
     const chat = msgRows
       .filter(m => m.group_id === g.id)
       .map(m => {
-        if (m.sys) return { id: m.id, sys: true, text: m.text };
+        if (m.sys) return { id: m.id, sys: true, text: m.text, ts: m.created_at };
         if (m.plan_what) {
           return {
             id: m.id,
             from: m.user_id,
             plan: { what: m.plan_what, when: m.plan_when },
-            ins: planMap.get(m.id) || []
+            ins: planMap.get(m.id) || [],
+            ts: m.created_at
           };
         }
-        return { id: m.id, from: m.user_id, text: m.text };
+        return { id: m.id, from: m.user_id, text: m.text, ts: m.created_at };
       });
 
     // Preview chat for non-members: last 2 non-system text messages
