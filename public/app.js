@@ -68,6 +68,26 @@ function relTime(ts) {
   return fmt(new Date(ts), { day: 'numeric', month: 'short' });
 }
 
+// --- unread tracking ---
+// we just store the last seen message id per group in localStorage
+function getLastSeen(groupId) {
+  return parseInt(localStorage.getItem('seen-' + groupId) || '0', 10);
+}
+function markSeen(groupId) {
+  const g = byId(groupId);
+  if (!g || !g.chat.length) return;
+  const lastId = g.chat[g.chat.length - 1].id;
+  if (lastId > getLastSeen(groupId)) {
+    localStorage.setItem('seen-' + groupId, String(lastId));
+  }
+}
+function unreadCount(g) {
+  if (!isMember(g)) return 0;
+  const seen = getLastSeen(g.id);
+  // only count non-system messages the current user didn't send
+  return g.chat.filter(m => !m.sys && m.from !== state.me?.id && m.id > seen).length;
+}
+
 function isInRatingWindow(g) {
   const s = nextSession(g);
   const endTs = s.getTime() + g.duration * 60000;
@@ -481,6 +501,7 @@ function myGroupsView() {
     const s = nextSession(g);
     const goers = g.members.filter(id => g.rsvp[id] === 'going');
     const host = person(g.host);
+    const unread = unreadCount(g);
     return `<article class="panel hub-card" style="--cat:${CATS[g.cat].hue}">
       ${dateBlock(s)}
       <div class="hub-main">
@@ -489,7 +510,7 @@ function myGroupsView() {
         <div class="spot">${svg('pin', 18)}<span>${esc(g.spot)}<br><span class="muted">${g.host === state.me.id ? 'Your note for members' : esc(host.name) + ', host'}</span></span></div>
         <div class="hub-row">${rsvpSeg(g, true)}<span class="going-line"><span class="stack">${goers.slice(0, 5).map(id => avatar(id)).join('')}</span>${goers.length} going</span></div>
       </div>
-      <div class="hub-actions"><a class="btn btn-secondary btn-sm" href="#group-${g.id}" data-act="open-chat">${svg('chat', 16)}Open chat</a><a class="btn btn-secondary btn-sm" href="#group-${g.id}">Group page</a></div>
+      <div class="hub-actions"><a class="btn btn-secondary btn-sm" href="#group-${g.id}" data-act="open-chat">${svg('chat', 16)}${unread ? `<span class="unread-dot">${unread}</span>` : ''}Chat</a><a class="btn btn-secondary btn-sm" href="#group-${g.id}">Group page</a></div>
     </article>`;
   }).join('');
 
@@ -693,10 +714,11 @@ function render() {
   const active = document.activeElement;
   const focusKey = !changed && active && active.dataset ? active.dataset.key : null;
   const n = joinedGroups().length;
+  const totalUnread = joinedGroups().reduce((sum, g) => sum + unreadCount(g), 0);
   const navTab = r.name === 'group' ? 'discover' : r.name;
 
   document.getElementById('nav').innerHTML = NAV.map(([id, icon, long, short]) =>
-    `<a href="#${id}" class="${id === 'start-group' ? 'nav-start' : ''}"${id === navTab ? ' aria-current="page"' : ''}>${svg(icon, 18)}<span class="lbl-long">${long}</span><span class="lbl-short">${short}</span>${id === 'my-groups' && n ? `<span class="nav-count" aria-label="${n} joined">${n}</span>` : ''}</a>`
+    `<a href="#${id}" class="${id === 'start-group' ? 'nav-start' : ''}"${id === navTab ? ' aria-current="page"' : ''}>${svg(icon, 18)}<span class="lbl-long">${long}</span><span class="lbl-short">${short}</span>${id === 'my-groups' ? (totalUnread ? `<span class="nav-count" aria-label="${totalUnread} unread messages">${totalUnread}</span>` : n ? `<span class="nav-count" aria-label="${n} groups">${n}</span>` : '') : ''}</a>`
   ).join('');
 
   main.innerHTML = r.name === 'group' ? groupView(r.g)
@@ -711,6 +733,7 @@ function render() {
 
   const chatList = document.getElementById('chat-list');
   if (chatList) chatList.scrollTop = chatList.scrollHeight;
+  if (r.name === 'group' && isMember(r.g)) markSeen(r.g.id);
 
   if (changed) {
     main.classList.remove('view-enter');
