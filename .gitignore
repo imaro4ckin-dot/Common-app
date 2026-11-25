@@ -1,0 +1,16 @@
+# SQLite database (auto-recreated from seed on first run)
+data/
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+
+# Environment / secrets
+.env
+.env.local
+
+# Editor
+.vscode/
+.idea/

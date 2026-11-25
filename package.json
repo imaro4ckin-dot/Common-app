@@ -1,0 +1,13 @@
+{
+  "name": "common-app",
+  "version": "1.0.0",
+  "description": "Common — Weekly small-group meetups for newcomers to build lasting friendships",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}
