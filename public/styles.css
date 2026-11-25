@@ -359,3 +359,103 @@ dialog.sheet::backdrop { background: var(--backdrop); }
   .pin::before { inset: -5px; }
   dialog.sheet { margin: auto 0 0; width: 100%; max-width: 100%; border-radius: 22px 22px 0 0; }
 }
+
+/* ── Onboarding dialog ───────────────────────────────────────────── */
+dialog.onboarding-dialog {
+  border: none; padding: 0; background: transparent;
+  width: min(520px, calc(100% - 32px)); max-height: calc(100% - 48px);
+  overflow: visible;
+}
+dialog.onboarding-dialog::backdrop { background: var(--backdrop); backdrop-filter: blur(4px); }
+.ob-inner {
+  background: var(--surface); border-radius: var(--r-lg); padding: 32px;
+  display: flex; flex-direction: column; gap: 20px;
+  box-shadow: var(--shadow); animation: slideUp 300ms var(--ease-out);
+}
+@keyframes slideUp { from { transform: translateY(16px); opacity: 0; } }
+.ob-steps { display: flex; gap: 6px; }
+.ob-step { flex: 1; height: 4px; border-radius: 999px; background: var(--line); transition: background 300ms ease; }
+.ob-step.done { background: var(--accent); }
+.ob-heading { font-size: 22px; margin: 0; }
+.ob-body { display: flex; flex-direction: column; gap: 12px; }
+.ob-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+@media (max-width: 560px) {
+  .ob-inner { padding: 24px; }
+}
+
+/* ── Pause banner ────────────────────────────────────────────────── */
+.pause-banner {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 14px 18px; border-radius: var(--r-md);
+  background: var(--new-bg); color: var(--new-fg);
+  border: 1px solid color-mix(in oklab, var(--new-fg) 25%, transparent);
+  font-size: 14px; margin-bottom: 4px;
+}
+.pause-banner strong { font-size: 15px; }
+
+/* ── Host management actions ─────────────────────────────────────── */
+.host-actions {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin-top: 18px; padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+/* ── Post-meetup rating ──────────────────────────────────────────── */
+.rating-block {
+  margin-top: 18px; padding-top: 18px;
+  border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.rating-btns { display: flex; gap: 10px; }
+.rating-recorded { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--muted); }
+.rating-recorded .rating-emoji { font-size: 22px; }
+@media (max-width: 560px) { .rating-btns { flex-direction: column; } }
+
+/* ── Streak / tenure label ───────────────────────────────────────── */
+.streak-label {
+  display: inline-flex; align-items: center;
+  padding: 2px 7px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 11px; font-weight: 600; margin-left: auto; flex-shrink: 0;
+}
+
+/* ── Preview chat (non-member teaser) ───────────────────────────── */
+.chat-preview-wrap {
+  position: relative; overflow: hidden; margin-bottom: 12px;
+  border-radius: var(--r-sm); pointer-events: none;
+  mask-image: linear-gradient(to bottom, transparent 0%, black 50%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 50%);
+}
+.chat-preview { display: flex; flex-direction: column; gap: 8px; padding: 8px 4px; }
+.preview-msg { display: flex; gap: 8px; font-size: 14px; color: var(--muted); overflow: hidden; }
+.pm-name { font-weight: 600; flex-shrink: 0; color: var(--ink); white-space: nowrap; }
+.pm-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Intro-on-join prompt ────────────────────────────────────────── */
+.intro-form-wrap { display: flex; flex-direction: column; gap: 12px; }
+.intro-form-wrap p { margin: 0; font-size: 15px; }
+.intro-row { display: flex; gap: 8px; }
+.intro-row input { flex: 1; min-height: 44px; padding: 0 12px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 15px; }
+.intro-row input:focus { outline: none; border-color: var(--accent); }
+
+/* ── Waitlist section in My Groups ──────────────────────────────── */
+.waitlist-section { margin-top: 20px; }
+.waitlist-pos { font-size: 13px; color: var(--muted); }
+
+/* ── Wish button in activity sheet ──────────────────────────────── */
+.wish-count { font-size: 11px; color: var(--accent); font-weight: 600; }
+.sheet-item-row { display: contents; }
+.wish-btn {
+  all: unset; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600;
+  background: var(--surface-2); color: var(--muted);
+  border: 1px solid var(--line);
+  transition: background 160ms ease, color 160ms ease;
+  margin-top: 4px; align-self: flex-start;
+}
+.wish-btn:hover, .wish-btn.wished { background: var(--friend-bg); color: var(--friend-fg); border-color: transparent; }
+.wish-btn.wished { background: var(--friend-bg); }
+.sheet-item { flex-direction: column; align-items: flex-start; gap: 2px; }
+.sheet-item > span { display: flex; flex-direction: column; gap: 2px; }

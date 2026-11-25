@@ -42,6 +42,24 @@ function parseUserId(req) {
   return 'me';
 }
 
+// Project next session time (same logic as client-side nextSession)
+function nextSessionFromGroup(g) {
+  const d = new Date(`${g.date}T${g.time}:00`);
+  const now = Date.now();
+  if (g.weekly) {
+    while (d.getTime() + g.duration * 60000 < now) d.setDate(d.getDate() + 7);
+  }
+  return d;
+}
+
+function getMondayTs(ts) {
+  const d = new Date(ts);
+  const day = d.getDay();
+  d.setDate(d.getDate() - ((day + 6) % 7));
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
 export function createApp(db) {
   return async function handler(req, res) {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -121,9 +139,9 @@ export function createApp(db) {
         const now = Date.now();
 
         db.prepare(`
-          INSERT INTO groups (id, name, cat, date, time, duration, weekly, desc, place, area, spot, lang, cost, size, host, friends_only, lat, lng, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(id, name, cat, date, time, duration, weekly, desc, place, area, spot, JSON.stringify(lang), cost, size, currentUserId, friendsOnly, lat, lng, now);
+          INSERT INTO groups (id, name, cat, date, time, duration, weekly, desc, place, area, spot, lang, cost, size, host, friends_only, lat, lng, paused_until, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(id, name, cat, date, time, duration, weekly, desc, place, area, spot, JSON.stringify(lang), cost, size, currentUserId, friendsOnly, lat, lng, null, now);
 
         db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, ?, ?)').run(id, currentUserId, 'going', now);
         db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
@@ -133,7 +151,24 @@ export function createApp(db) {
         return json(res, 201, { id, state: getFullState(db, currentUserId) });
       }
 
-      const groupMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)\/(join|leave|rsvp|messages|calendar\.ics|arrive)$/i);
+      // Wishlist toggle
+      if (path === '/api/wishlist' && method === 'POST') {
+        const body = await readBody(req);
+        const cat = String(body.cat || '').trim();
+        const area = String(body.area || '').trim();
+        if (!CATS[cat]) return json(res, 400, { error: 'Invalid category' });
+        if (area !== 'any' && !AREAS[area]) return json(res, 400, { error: 'Invalid area' });
+
+        const existing = db.prepare('SELECT 1 FROM wishlist WHERE user_id = ? AND cat = ? AND area = ?').get(currentUserId, cat, area);
+        if (existing) {
+          db.prepare('DELETE FROM wishlist WHERE user_id = ? AND cat = ? AND area = ?').run(currentUserId, cat, area);
+        } else {
+          db.prepare('INSERT INTO wishlist (user_id, cat, area, created_at) VALUES (?, ?, ?, ?)').run(currentUserId, cat, area, Date.now());
+        }
+        return json(res, 200, getFullState(db, currentUserId));
+      }
+
+      const groupMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)\/(join|leave|rsvp|messages|calendar\.ics|arrive|waitlist|rate|pause|transfer)$/i);
       if (groupMatch) {
         const [, groupId, action] = groupMatch;
         const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
@@ -159,15 +194,29 @@ export function createApp(db) {
           if (members.length >= group.size) return json(res, 409, { error: 'This group is full' });
 
           db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, NULL, ?)').run(groupId, currentUserId, Date.now());
-          return json(res, 200, getFullState(db, currentUserId));
+          // Remove from waitlist if present
+          db.prepare('DELETE FROM waitlist WHERE group_id = ? AND user_id = ?').run(groupId, currentUserId);
+          return json(res, 200, { ...getFullState(db, currentUserId), showIntro: true });
         }
 
         if (action === 'leave' && method === 'POST') {
           if (group.host === currentUserId) return json(res, 400, { error: 'Hosts cannot leave their own group' });
-          db.prepare('DELETE FROM memberships WHERE group_id = ? AND user_id = ?').run(groupId, currentUserId);          db.prepare(`
+          db.prepare('DELETE FROM memberships WHERE group_id = ? AND user_id = ?').run(groupId, currentUserId);
+          db.prepare(`
             DELETE FROM plan_participants
             WHERE user_id = ? AND message_id IN (SELECT id FROM messages WHERE group_id = ?)
           `).run(currentUserId, groupId);
+
+          // Auto-promote first waitlister
+          const next = db.prepare('SELECT user_id FROM waitlist WHERE group_id = ? ORDER BY joined_at ASC LIMIT 1').get(groupId);
+          if (next) {
+            db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, NULL, ?)').run(groupId, next.user_id, Date.now());
+            db.prepare('DELETE FROM waitlist WHERE group_id = ? AND user_id = ?').run(groupId, next.user_id);
+            const promotedUser = db.prepare('SELECT name FROM users WHERE id = ?').get(next.user_id);
+            db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
+              groupId, null, `${promotedUser?.name || 'Someone'} joined from the waitlist.`, Date.now()
+            );
+          }
           return json(res, 200, getFullState(db, currentUserId));
         }
 
@@ -180,7 +229,17 @@ export function createApp(db) {
           if (!membership) return json(res, 403, { error: 'Join the group before RSVPing' });
 
           db.prepare('UPDATE memberships SET rsvp = ? WHERE group_id = ? AND user_id = ?').run(body.status, groupId, currentUserId);
-          return json(res, 200, getFullState(db, currentUserId));
+
+          // Milestone detection: approximate total meetup-weeks across all groups
+          let milestone = null;
+          if (body.status === 'going') {
+            const allMemberships = db.prepare('SELECT joined_at FROM memberships WHERE user_id = ?').all(currentUserId);
+            const nowTs = Date.now();
+            const totalWeeks = allMemberships.reduce((sum, m) => sum + Math.max(0, Math.floor((nowTs - m.joined_at) / (7 * 86400000))), 0);
+            if ([4, 10, 20, 50].includes(totalWeeks)) milestone = totalWeeks;
+          }
+
+          return json(res, 200, { ...getFullState(db, currentUserId), milestone });
         }
 
         if (action === 'arrive' && method === 'POST') {
@@ -218,6 +277,78 @@ export function createApp(db) {
             groupId, currentUserId, text, now
           );
           return json(res, 201, getFullState(db, currentUserId));
+        }
+
+        if (action === 'waitlist' && method === 'POST') {
+          const membership = db.prepare('SELECT 1 FROM memberships WHERE group_id = ? AND user_id = ?').get(groupId, currentUserId);
+          if (membership) return json(res, 400, { error: 'You are already a member of this group' });
+
+          const existing = db.prepare('SELECT 1 FROM waitlist WHERE group_id = ? AND user_id = ?').get(groupId, currentUserId);
+          if (existing) {
+            db.prepare('DELETE FROM waitlist WHERE group_id = ? AND user_id = ?').run(groupId, currentUserId);
+          } else {
+            const memberCount = db.prepare('SELECT COUNT(*) AS c FROM memberships WHERE group_id = ?').get(groupId).c;
+            if (memberCount < group.size) return json(res, 400, { error: 'Group is not full — you can join directly' });
+            db.prepare('INSERT INTO waitlist (group_id, user_id, joined_at) VALUES (?, ?, ?)').run(groupId, currentUserId, Date.now());
+          }
+          return json(res, 200, getFullState(db, currentUserId));
+        }
+
+        if (action === 'rate' && method === 'POST') {
+          const membership = db.prepare('SELECT 1 FROM memberships WHERE group_id = ? AND user_id = ?').get(groupId, currentUserId);
+          if (!membership) return json(res, 403, { error: 'You are not a member of this group' });
+
+          const body = await readBody(req);
+          if (body.rating !== 1 && body.rating !== -1) return json(res, 400, { error: 'Rating must be 1 or -1' });
+
+          // Validate: within 6 hours after meetup end
+          const parsed = { ...group, weekly: Boolean(group.weekly), lang: JSON.parse(group.lang) };
+          const sess = nextSessionFromGroup(parsed);
+          const endTs = sess.getTime() + group.duration * 60000;
+          const now = Date.now();
+          const sinceEnd = now - endTs;
+          if (sinceEnd < 0 || sinceEnd > 6 * 3600000) {
+            return json(res, 400, { error: 'Rating only allowed within 6 hours after the meetup ends' });
+          }
+
+          const weekTs = getMondayTs(endTs);
+          db.prepare(`
+            INSERT INTO meetup_ratings (group_id, user_id, week_ts, rating)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(group_id, user_id, week_ts) DO UPDATE SET rating = excluded.rating
+          `).run(groupId, currentUserId, weekTs, body.rating);
+
+          return json(res, 200, getFullState(db, currentUserId));
+        }
+
+        if (action === 'pause' && method === 'POST') {
+          if (group.host !== currentUserId) return json(res, 403, { error: 'Only the host can pause the group' });
+          const isPaused = group.paused_until && new Date(group.paused_until) > new Date();
+          if (isPaused) {
+            db.prepare('UPDATE groups SET paused_until = NULL WHERE id = ?').run(groupId);
+          } else {
+            const twoWeeks = new Date();
+            twoWeeks.setDate(twoWeeks.getDate() + 14);
+            db.prepare('UPDATE groups SET paused_until = ? WHERE id = ?').run(twoWeeks.toISOString().slice(0, 10), groupId);
+          }
+          return json(res, 200, getFullState(db, currentUserId));
+        }
+
+        if (action === 'transfer' && method === 'POST') {
+          if (group.host !== currentUserId) return json(res, 403, { error: 'Only the host can transfer hosting' });
+          const body = await readBody(req);
+          const newHostId = String(body.newHost || '').trim();
+          if (!newHostId) return json(res, 400, { error: 'newHost is required' });
+          const isMemberCheck = db.prepare('SELECT 1 FROM memberships WHERE group_id = ? AND user_id = ?').get(groupId, newHostId);
+          if (!isMemberCheck) return json(res, 400, { error: 'New host must be a current member' });
+          const targetUser = db.prepare('SELECT name FROM users WHERE id = ?').get(newHostId);
+          if (!targetUser) return json(res, 404, { error: 'User not found' });
+
+          db.prepare('UPDATE groups SET host = ? WHERE id = ?').run(newHostId, groupId);
+          db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
+            groupId, null, `${targetUser.name} is now hosting the group.`, Date.now()
+          );
+          return json(res, 200, getFullState(db, currentUserId));
         }
       }
 

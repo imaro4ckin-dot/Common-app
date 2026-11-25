@@ -6,13 +6,14 @@ const LANGS = ['English', 'German', 'Spanish', 'French', 'Turkish', 'Arabic'];
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const AV_HUES = ['#2F80ED', '#E8590C', '#0CA678', '#D6336C', '#F08C00', '#1098AD', '#2B8A3E', '#9C6B3F'];
 
-let state = { me: null, people: {}, friends: [], groups: [] };
+let state = { me: null, people: {}, friends: [], groups: [], wishes: [], wishCounts: {} };
 const ui = {
   cat: 'all',
   lang: 'any',
   dist: 'any',
   sort: 'suggested',
   friendsOnly: false,
+  newHereOnly: false,
   view: 'list',
   pin: null,
   leave: false,
@@ -21,7 +22,8 @@ const ui = {
   startCat: null,
   sheetQuery: '',
   startLat: null,
-  startLng: null
+  startLng: null,
+  onboarding: null
 };
 
 /* Helpers */
@@ -51,6 +53,16 @@ const newCount = g => g.members.filter(id => id !== state.me?.id && person(id)?.
 const friendCount = g => g.members.filter(id => isFriend(id)).length;
 const countRsvp = (g, v) => Object.entries(g.rsvp || {}).filter(([id, r]) => r === v && g.members.includes(id)).length;
 const joinedGroups = () => state.groups.filter(isMember).sort((a, b) => nextSession(a) - nextSession(b));
+const isPaused = g => g.pausedUntil && new Date(g.pausedUntil) > new Date();
+const isOnWaitlist = g => Array.isArray(g.waitlist) && g.waitlist.includes(state.me?.id);
+const getMemberMeta = (g, uid) => (g.membersMeta || []).find(m => m.userId === uid) || { weeksIn: 0, mutualFriends: 0 };
+
+function isInRatingWindow(g) {
+  const s = nextSession(g);
+  const endTs = s.getTime() + g.duration * 60000;
+  const now = Date.now();
+  return now > endTs && (now - endTs) <= 6 * 3600000;
+}
 
 function avatar(id, cls = '') {
   const p = person(id);
@@ -92,8 +104,24 @@ async function api(url, opts = {}) {
   return data;
 }
 
+function mergeState(res) {
+  state = {
+    me: res.me,
+    people: res.people,
+    friends: res.friends,
+    groups: res.groups,
+    wishes: res.wishes || [],
+    wishCounts: res.wishCounts || {}
+  };
+}
+
 async function loadState() {
-  state = await api('/api/state');
+  const res = await api('/api/state');
+  mergeState(res);
+  if (state.me && state.me.interests.length === 0 && state.me.availability.length === 0) {
+    ui.onboarding = 1;
+    renderOnboarding();
+  }
   render();
 }
 
@@ -110,6 +138,50 @@ function toast(msg) {
   });
 }
 
+/* Onboarding */
+const obDialog = document.getElementById('onboarding');
+
+function renderOnboarding() {
+  if (!ui.onboarding || !obDialog) return;
+  const step = ui.onboarding;
+  const me = state.me;
+  const allInterestLabels = Object.values(CATS).map(c => c.label);
+
+  // Update progress dots
+  const dotsEl = document.getElementById('ob-dots');
+  if (dotsEl) {
+    dotsEl.innerHTML = [1, 2, 3].map(i => `<span class="ob-step${i <= step ? ' done' : ''}"></span>`).join('');
+  }
+
+  const titleEl = document.getElementById('ob-title');
+  const bodyEl = document.getElementById('ob-body');
+  const footerEl = document.getElementById('ob-footer');
+  if (!titleEl || !bodyEl || !footerEl) return;
+
+  if (step === 1) {
+    titleEl.textContent = 'Welcome to Common';
+    bodyEl.innerHTML = `<p class="lead" style="margin:0">Let's personalise your groups. First, where in Heidelberg are you?</p>
+      <div class="field"><label for="ob-area">Your neighbourhood</label>
+        <select class="input" id="ob-area">${Object.keys(AREAS).map(a => `<option${a === me.area ? ' selected' : ''}>${a}</option>`).join('')}</select>
+      </div>`;
+    footerEl.innerHTML = `<button type="button" class="btn btn-primary" data-act="ob-next" data-step="1">Next</button>
+      <button type="button" class="btn-link" data-act="ob-skip">Skip for now</button>`;
+  } else if (step === 2) {
+    titleEl.textContent = 'What are you into?';
+    bodyEl.innerHTML = `<p class="lead" style="margin:0">Pick anything that appeals. This helps us suggest the right groups.</p>
+      <div class="toggles">${allInterestLabels.map(lbl => `<label class="toggle"><input type="checkbox" name="interests" value="${esc(lbl)}"${me.interests.includes(lbl) ? ' checked' : ''}><span>${esc(lbl)}</span></label>`).join('')}</div>`;
+    footerEl.innerHTML = `<button type="button" class="btn btn-primary" data-act="ob-next" data-step="2">Next</button>
+      <button type="button" class="btn-link" data-act="ob-skip">Skip for now</button>`;
+  } else {
+    titleEl.textContent = 'When are you free?';
+    bodyEl.innerHTML = `<p class="lead" style="margin:0">Which days can you usually make it to a meetup?</p>
+      <div class="toggles">${DAYS.map((d, idx) => `<label class="toggle"><input type="checkbox" name="availability" value="${idx}"${me.availability.includes(idx) ? ' checked' : ''}><span>${d}</span></label>`).join('')}</div>`;
+    footerEl.innerHTML = `<button type="button" class="btn btn-primary" data-act="ob-next" data-step="3">Show me groups</button>`;
+  }
+
+  if (!obDialog.open) obDialog.showModal();
+}
+
 /* Views */
 function cardHTML(g, preview = false) {
   const c = CATS[g.cat];
@@ -122,8 +194,15 @@ function cardHTML(g, preview = false) {
     : fc > 0
       ? `<span class="badge-friend">${fc} ${fc === 1 ? 'friend' : 'friends'}</span>`
       : nn ? `<span class="badge-new">${nn} new here</span>` : '';
-  const reasonLine = !preview && g.matchReasons?.length
-    ? `<div class="tags"><span class="match-tag">${svg('spark', 12)}${esc(g.matchReasons[0])}</span></div>`
+
+  let matchLabel = '';
+  if (g.matchedInterestCount > 1) {
+    matchLabel = `${g.matchedInterestCount} interests match`;
+  } else if (g.matchReasons?.length) {
+    matchLabel = g.matchReasons[0];
+  }
+  const reasonLine = !preview && matchLabel
+    ? `<div class="tags"><span class="match-tag">${svg('spark', 12)}${esc(matchLabel)}</span></div>`
     : '';
 
   return `<${tag} class="card"${preview ? '' : ` href="#group-${g.id}"`} style="--cat:${c.hue}">
@@ -141,7 +220,8 @@ function filtered() {
     (ui.cat === 'all' || g.cat === ui.cat) &&
     (ui.lang === 'any' || g.lang.includes(ui.lang)) &&
     (ui.dist === 'any' || g.distKm <= Number(ui.dist)) &&
-    (!ui.friendsOnly || g.friendsOnly || friendCount(g) > 0)
+    (!ui.friendsOnly || g.friendsOnly || friendCount(g) > 0) &&
+    (!ui.newHereOnly || newCount(g) > 0)
   );
   if (ui.sort === 'suggested') {
     return list.sort((a, b) => (b.matchScore - a.matchScore) || (a.distKm - b.distKm));
@@ -166,6 +246,7 @@ function discoverView() {
       ${extra}
       <button type="button" class="chip" data-act="more" data-key="more" aria-haspopup="dialog">${svg('grid', 16)}More activities</button>
       <button type="button" class="chip" data-act="toggle-friends" data-key="f-friends" aria-pressed="${ui.friendsOnly}">${svg('heart', 15)}Friends</button>
+      <button type="button" class="chip" data-act="toggle-new-here" data-key="f-new-here" aria-pressed="${ui.newHereOnly}">${svg('spark', 15)}New here</button>
     </div>
     <div class="tools">
       <label class="select"><span class="sr-only">Sort</span><select id="f-sort" data-filter="sort" data-key="f-sort">${opts([['suggested', 'Suggested for you'], ['closest', 'Closest first']], ui.sort)}</select></label>
@@ -176,7 +257,15 @@ function discoverView() {
   </div>`;
 
   const line = `<div class="result-line"><span>${list.length} ${list.length === 1 ? 'group' : 'groups'}${ui.cat !== 'all' ? ' for ' + CATS[ui.cat].label.toLowerCase() : ''} · ${ui.sort === 'suggested' ? 'ranked by your interests & availability' : 'closest to ' + esc(state.me.area)}</span></div>`;
-  const empty = `<div class="panel empty"><h2>No groups match yet</h2><p class="muted">Try another language, turn off the friends filter, or widen the distance. Or start the group you were looking for.</p><div class="actions"><button type="button" class="btn btn-secondary" data-act="clear">Clear filters</button><a class="btn btn-primary" href="#start-group" data-act="start-with">${svg('plus', 16)}Start a group</a></div></div>`;
+
+  const wishKey = ui.cat;
+  const wishCount = ui.cat !== 'all' ? (state.wishCounts?.[wishKey] || 0) : 0;
+  const myWish = ui.cat !== 'all' && state.wishes?.some(w => w.cat === wishKey && w.area === 'any');
+  const wishBtn = ui.cat !== 'all'
+    ? `<button type="button" class="btn ${myWish ? 'btn-going' : 'btn-secondary'}" data-act="wish" data-cat="${ui.cat}" data-area="any">${svg('heart', 16)}${myWish ? 'Wished for' : 'Wish for this'}${wishCount > 0 ? ` · ${wishCount}` : ''}</button>`
+    : '';
+
+  const empty = `<div class="panel empty"><h2>No groups match yet</h2><p class="muted">Try another language, turn off the friends filter, or widen the distance. Or start the group you were looking for.</p><div class="actions"><button type="button" class="btn btn-secondary" data-act="clear">Clear filters</button><a class="btn btn-primary" href="#start-group" data-act="start-with">${svg('plus', 16)}Start a group</a>${wishBtn}</div></div>`;
 
   let body;
   const youCoords = AREAS[state.me?.area] || AREAS.Bergheim;
@@ -230,6 +319,11 @@ function groupView(g) {
   const going = countRsvp(g, 'going');
   const skip = countRsvp(g, 'skip');
   const youCoords = AREAS[state.me?.area] || AREAS.Bergheim;
+  const onWl = isOnWaitlist(g);
+
+  const pauseBanner = isPaused(g)
+    ? `<div class="pause-banner" role="alert"><strong>Group on pause until ${esc(fmt(new Date(g.pausedUntil), { weekday: 'long', day: 'numeric', month: 'long' }))}</strong><span class="muted">The host has paused this group for 2 weeks.</span></div>`
+    : '';
 
   const head = `<section class="panel g-head" style="--cat:${c.hue}">
     <div class="g-title"><span class="cat-tile lg">${svg(g.cat, 28)}</span><div><p class="g-kicker">${c.label} · ${g.distKm.toFixed(1)} km from you</p><h1 tabindex="-1">${esc(g.name)}</h1></div></div>
@@ -260,6 +354,23 @@ function groupView(g) {
         <p class="note">When it's time to meet, tap here so others can spot you at ${esc(g.spot.split(',')[0])}.</p>
       </div>`;
 
+  // Post-meetup rating block
+  const ratingBlock = (() => {
+    if (!member) return '';
+    const inWindow = isInRatingWindow(g);
+    if (!inWindow && g.myRating === null) return '';
+    if (g.myRating !== null) {
+      return `<div class="rating-block"><div class="rating-recorded"><span>You rated this meetup</span><span class="rating-emoji">${g.myRating === 1 ? '👍' : '👎'}</span></div></div>`;
+    }
+    return `<div class="rating-block" aria-labelledby="rate-q">
+      <p class="q" id="rate-q">How was it?</p>
+      <div class="rating-btns">
+        <button type="button" class="btn btn-secondary" data-act="rate" data-id="${g.id}" data-val="1" data-key="rate-up">${svg('check', 16)} Great</button>
+        <button type="button" class="btn btn-secondary" data-act="rate" data-id="${g.id}" data-val="-1" data-key="rate-down">Could be better</button>
+      </div>
+    </div>`;
+  })();
+
   const act = member
     ? `<section class="panel g-act" aria-labelledby="act-h">
         <div class="act-head"><div><h2 id="act-h">Next meetup</h2><p class="big-date">${esc(fmt(s, { weekday: 'long', day: 'numeric', month: 'long' }))} · ${g.time}</p><p class="muted">${g.duration} min · ${esc(g.place)}, ${esc(g.area)}</p></div>${g.host === state.me.id ? "<span class=\"pill pill-going\">You're hosting</span>" : ''}</div>
@@ -269,9 +380,14 @@ function groupView(g) {
         <p class="note">${going} going${skip ? ` · ${skip} skipping` : ''}. Skipping keeps your place in the group.</p>
         <div class="cal-links"><span>Add recurring invite:</span><a class="btn btn-secondary btn-sm" href="${links.ics}" download>${svg('download', 14)}Download .ics</a><a href="${links.google}" target="_blank" rel="noopener">Google Calendar</a><a href="${links.outlook}" target="_blank" rel="noopener">Outlook</a></div>
         ${arrivalBlock}
+        ${ratingBlock}
+        ${g.host === state.me.id ? `<div class="host-actions">
+          <button type="button" class="btn btn-secondary btn-sm" data-act="pause" data-id="${g.id}" data-key="pause-btn">${svg('clock', 14)}${isPaused(g) ? 'Resume group' : 'Pause for 2 weeks'}</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-act="transfer" data-id="${g.id}" data-key="transfer-btn">${svg('users', 14)}Transfer hosting</button>
+        </div>` : ''}
       </section>`
     : `<section class="panel g-act" aria-labelledby="act-h">
-        <h2 id="act-h">${full ? 'This group is full' : 'Join this group'}</h2>
+        <h2 id="act-h">${full ? (onWl ? 'On the waitlist' : 'This group is full') : 'Join this group'}</h2>
         <div class="places"><span class="stack">${g.members.map(id => avatar(id)).join('')}</span><span><strong>${g.members.length} of ${g.size}</strong> places taken</span>${nn ? `<span class="badge-new">${nn} new here</span>` : ''}</div>
         ${(() => {
           const goingNewcomers = g.members.filter(id => g.rsvp[id] === 'going' && id !== state.me?.id && person(id)?.newHere);
@@ -279,7 +395,10 @@ function groupView(g) {
             ? `<p class="note" style="margin-top:10px">${svg('spark', 13)} ${goingNewcomers.length === 1 ? person(goingNewcomers[0]).name + ' is new here too and coming this week.' : goingNewcomers.length + ' people new here are coming this week.'}</p>`
             : '';
         })()}
-        <div class="join-row"><button type="button" class="btn btn-primary" data-act="join" data-id="${g.id}" data-key="join"${full ? ' disabled' : ''}>${full ? 'Group is full' : 'Join group'}</button><span class="note" style="margin:0">You can skip any week without leaving.</span></div>
+        ${full
+          ? `<div class="join-row"><button type="button" class="btn ${onWl ? 'btn-going' : 'btn-secondary'}" data-act="waitlist" data-id="${g.id}" data-key="waitlist-btn">${onWl ? svg('check', 16) + `On waitlist (position ${g.waitlistPos})` : svg('users', 16) + `Join waitlist${g.waitlist?.length > 0 ? ` · ${g.waitlist.length} waiting` : ''}`}</button><span class="note" style="margin:0">We'll notify you when a spot opens up.</span></div>`
+          : `<div class="join-row"><button type="button" class="btn btn-primary" data-act="join" data-id="${g.id}" data-key="join">Join group</button><span class="note" style="margin:0">You can skip any week without leaving.</span></div>`
+        }
       </section>`;
 
   const mini = `<div id="leaflet-mini-${g.id}" style="height:200px;border-radius:var(--r-md);border:1px solid var(--line);overflow:hidden;margin-top:16px;"></div>`;
@@ -301,10 +420,20 @@ function groupView(g) {
         const p = person(id);
         if (!p) return '';
         const r = g.rsvp[id];
-        return `<li class="member"><button type="button" class="member-btn" data-act="profile" data-uid="${id}">${avatar(id)}<span class="member-text"><strong>${esc(p.name)}${p.verified ? `<span class="badge-verified">${svg('shield', 11)}Verified</span>` : ''}${isFriend(id) ? '<span class="badge-friend">Friend</span>' : ''}${id === g.host ? '<span class="muted" style="font-weight:500;font-size:13px">· Host</span>' : ''}</strong><span>${esc(p.since)}${p.interests.length ? ' · ' + esc(p.interests.join(', ')) : ''}</span></span></button>${p.newHere && id !== state.me.id ? '<span class="badge-new">New here</span>' : ''}${member && r === 'going' ? `<span class="pill pill-going">${svg('check', 12)}Going</span>` : ''}</li>`;
+        const meta = getMemberMeta(g, id);
+        const streakLabel = meta.weeksIn >= 2 ? `<span class="streak-label">Wk ${meta.weeksIn}</span>` : '';
+        return `<li class="member"><button type="button" class="member-btn" data-act="profile" data-uid="${id}">${avatar(id)}<span class="member-text"><strong>${esc(p.name)}${p.verified ? `<span class="badge-verified">${svg('shield', 11)}Verified</span>` : ''}${isFriend(id) ? '<span class="badge-friend">Friend</span>' : ''}${id === g.host ? '<span class="muted" style="font-weight:500;font-size:13px">· Host</span>' : ''}</strong><span>${esc(p.since)}${p.interests.length ? ' · ' + esc(p.interests.join(', ')) : ''}</span></span>${streakLabel}</button>${p.newHere && id !== state.me.id ? '<span class="badge-new">New here</span>' : ''}${member && r === 'going' ? `<span class="pill pill-going">${svg('check', 12)}Going</span>` : ''}</li>`;
       }).join('')}</ul>
     </section>
   </aside>`;
+
+  // Preview chat for non-members
+  const previewChatHtml = !member && g.previewChat?.length
+    ? `<div class="chat-preview-wrap" aria-hidden="true"><div class="chat-preview">${g.previewChat.map(m => {
+        const p = person(m.from);
+        return `<div class="preview-msg"><span class="pm-name">${esc(p?.name || '...')}</span><span class="pm-text">${esc(m.text)}</span></div>`;
+      }).join('')}</div></div>`
+    : '';
 
   const chat = member
     ? `<section class="panel g-chat" id="chat" aria-labelledby="chat-h">
@@ -315,7 +444,7 @@ function groupView(g) {
           ? `<form class="plan-form" id="plan-form" data-id="${g.id}" autocomplete="off"><div class="field"><label for="plan-what">What do you want to do?</label><input type="text" id="plan-what" name="what" maxlength="80" placeholder="Christmas market after the run" data-key="plan-what" required></div><div class="field"><label for="plan-when">When?</label><input type="text" id="plan-when" name="when" maxlength="40" placeholder="Saturday, 16:00" data-key="plan-when" required></div><div class="pf-actions"><button class="btn btn-primary btn-sm" type="submit">Share plan</button><button class="btn btn-secondary btn-sm" type="button" data-act="plan-toggle">Cancel</button></div></form>`
           : `<div class="chat-tools"><span class="note" style="margin:0">Want to meet outside the weekly slot?</span><button type="button" class="btn btn-secondary btn-sm" data-act="plan-toggle" data-key="plan-open">${svg('spark', 16)}Suggest an extra plan</button></div>`}
       </section>`
-    : `<section class="panel g-chat" id="chat" aria-labelledby="chat-h"><h2 id="chat-h">Group chat</h2><div class="locked">${svg('lock', 20)}<span>Join to read the chat, see the exact meeting spot and say hello before your first meetup.</span></div></section>`;
+    : `<section class="panel g-chat" id="chat" aria-labelledby="chat-h"><h2 id="chat-h">Group chat</h2>${previewChatHtml}<div class="locked">${svg('lock', 20)}<span>Join to read the chat, see the exact meeting spot and say hello before your first meetup.</span></div></section>`;
 
   let leave = '';
   if (member && g.host !== state.me.id) {
@@ -324,7 +453,7 @@ function groupView(g) {
       : `<div class="g-leave"><button type="button" class="btn-link" data-act="leave" data-key="leave">Leave group</button></div>`;
   }
 
-  return `<a class="back" href="#discover">${svg('back', 18)}All groups</a><div class="group-layout">${head}${act}${side}${chat}${leave}</div>`;
+  return `<a class="back" href="#discover">${svg('back', 18)}All groups</a>${pauseBanner}<div class="group-layout">${head}${act}${side}${chat}${leave}</div>`;
 }
 
 function rsvpSeg(g, small) {
@@ -351,7 +480,20 @@ function myGroupsView() {
       <div class="hub-actions"><a class="btn btn-secondary btn-sm" href="#group-${g.id}" data-act="open-chat">${svg('chat', 16)}Open chat</a><a class="btn btn-secondary btn-sm" href="#group-${g.id}">Group page</a></div>
     </article>`;
   }).join('');
-  return `<div class="page-head"><h1 tabindex="-1">Your week</h1><p class="lead">Who's coming to your next meetups, and where to find them.</p></div>${mine.length ? `<div class="hub">${cards}</div>` : emptyMine}`;
+
+  // Waitlisted groups
+  const waitlisted = state.groups.filter(g => !isMember(g) && isOnWaitlist(g));
+  const waitlistSection = waitlisted.length
+    ? `<section class="panel waitlist-section" aria-labelledby="wl-h">
+        <div class="h-row"><h2 id="wl-h">On the waitlist</h2><span class="muted">${waitlisted.length} group${waitlisted.length > 1 ? 's' : ''}</span></div>
+        <ul class="members">${waitlisted.map(g => {
+          const pos = g.waitlistPos;
+          return `<li class="member"><a href="#group-${g.id}" class="member-btn" style="--cat:${CATS[g.cat].hue}"><span class="cat-tile">${svg(g.cat, 20)}</span><span class="member-text"><strong>${esc(g.name)}</strong><span class="muted waitlist-pos">${esc(when(g))} · Position ${pos} of ${g.waitlist.length}</span></span></a><button type="button" class="btn btn-secondary btn-sm" data-act="waitlist" data-id="${g.id}">Leave</button></li>`;
+        }).join('')}</ul>
+      </section>`
+    : '';
+
+  return `<div class="page-head"><h1 tabindex="-1">Your week</h1><p class="lead">Who's coming to your next meetups, and where to find them.</p></div>${mine.length ? `<div class="hub">${cards}</div>` : emptyMine}${waitlistSection}`;
 }
 
 function calendarView() {
@@ -467,7 +609,6 @@ function formGroup() {
   const langsPicked = fd.getAll('lang');
   const lat = ui.startLat || null;
   const lng = ui.startLng || null;
-  // Derive area from nearest AREAS centroid when we have real coords
   let area = 'Altstadt';
   if (lat && lng) {
     let best = Infinity;
@@ -498,6 +639,7 @@ function formGroup() {
     members: [state.me.id],
     rsvp: { [state.me.id]: 'going' },
     distKm: 0.4,
+    matchedInterestCount: 0,
     chat: []
   };
 }
@@ -614,7 +756,9 @@ function renderActivitySheet() {
     <div class="sheet-search"><label class="sr-only" for="act-search">Search activities</label><input type="search" id="act-search" placeholder="Search activities..." value="${esc(ui.sheetQuery)}"></div>
     <div class="sheet-grid">${entries.map(([k, c]) => {
       const n = state.groups.filter(g => g.cat === k).length;
-      return `<button type="button" class="sheet-item" data-act="cat-sheet" data-val="${k}" aria-pressed="${ui.cat === k}" style="--cat:${c.hue}"><span class="cat-tile">${svg(k, 20)}</span><span><strong>${c.label}</strong>${n ? `${n} ${n === 1 ? 'group' : 'groups'}` : 'No groups yet'}</span></button>`;
+      const wc = state.wishCounts?.[k] || 0;
+      const isWished = state.wishes?.some(w => w.cat === k && w.area === 'any');
+      return `<button type="button" class="sheet-item" data-act="cat-sheet" data-val="${k}" aria-pressed="${ui.cat === k}" style="--cat:${c.hue}"><span class="cat-tile">${svg(k, 20)}</span><span><strong>${c.label}</strong><span>${n ? `${n} ${n === 1 ? 'group' : 'groups'}` : 'No groups yet'}</span>${wc > 0 ? `<span class="wish-count">${wc} wishing</span>` : ''}</span>${n === 0 ? `<span class="wish-btn${isWished ? ' wished' : ''}" data-act="wish" data-cat="${k}" data-area="any" role="button" aria-label="${isWished ? 'Remove wish' : 'Wish for this category'}" style="pointer-events:auto">${svg('heart', 13)}${isWished ? 'Wished' : 'Wish for this'}</span>` : ''}</button>`;
     }).join('')}</div>`;
   const inp = document.getElementById('act-search');
   if (inp) {
@@ -638,10 +782,18 @@ function openProfileSheet(uid) {
   if (!p) return;
   const isMe = uid === state.me.id;
   const friended = isFriend(uid);
+
+  // Mutual friends: use mutualFriendCount from people object (computed server-side)
+  const mutualCount = p.mutualFriendCount || 0;
+  const mutualLine = !isMe && mutualCount > 0
+    ? `<p class="note">${svg('heart', 14)} ${mutualCount} mutual familiar ${mutualCount === 1 ? 'face' : 'faces'}</p>`
+    : '';
+
   document.getElementById('sheet-title').textContent = 'Member profile';
   document.getElementById('sheet-body').innerHTML = `<div class="profile-modal">
     <div class="pm-head">${avatar(uid, 'lg')}<div><h3>${esc(p.name)} ${p.verified ? `<span class="badge-verified">${svg('shield', 12)}Verified</span>` : ''}</h3><p class="muted">${esc(p.since)} · ${esc(p.area)}</p></div></div>
     ${p.intro ? `<p>${esc(p.intro)}</p>` : ''}
+    ${mutualLine}
     <div class="tags">${p.languages.map(l => `<span class="tag">${svg('globe', 13)}${esc(l)}</span>`).join('')}${p.interests.map(i => `<span class="tag">${esc(i)}</span>`).join('')}</div>
     ${isMe ? `<a class="btn btn-secondary" href="#profile" data-act="close-sheet">Edit your profile</a>` : `<button type="button" class="btn ${friended ? 'btn-going' : 'btn-primary'}" data-act="toggle-friend" data-uid="${uid}">${svg('heart', 16)}${friended ? 'Familiar face (Friends)' : 'Add as familiar face'}</button>`}
   </div>`;
@@ -665,30 +817,88 @@ document.addEventListener('click', async e => {
       case 'view': ui.view = t.dataset.val; render(); break;
       case 'pin': ui.pin = t.dataset.id; render(); break;
       case 'toggle-friends': ui.friendsOnly = !ui.friendsOnly; ui.pin = null; render(); break;
-      case 'clear': ui.cat = 'all'; ui.lang = 'any'; ui.dist = 'any'; ui.friendsOnly = false; render(); break;
+      case 'toggle-new-here': ui.newHereOnly = !ui.newHereOnly; ui.pin = null; render(); break;
+      case 'clear': ui.cat = 'all'; ui.lang = 'any'; ui.dist = 'any'; ui.friendsOnly = false; ui.newHereOnly = false; render(); break;
       case 'start-with': ui.startCat = ui.cat !== 'all' ? ui.cat : null; break;
       case 'open-chat': ui.toChat = true; break;
       case 'profile': openProfileSheet(t.dataset.uid); break;
+
+      case 'ob-next': {
+        const step = Number(t.dataset.step);
+        const ob = document.getElementById('onboarding');
+        const patch = {};
+        if (step === 1) {
+          patch.area = ob?.querySelector('#ob-area')?.value;
+        } else if (step === 2) {
+          patch.interests = [...(ob?.querySelectorAll('input[name="interests"]:checked') || [])].map(el => el.value);
+        } else if (step === 3) {
+          patch.availability = [...(ob?.querySelectorAll('input[name="availability"]:checked') || [])].map(el => Number(el.value));
+          mergeState(await api('/api/me', { method: 'PATCH', body: JSON.stringify(patch) }));
+          ui.onboarding = null;
+          obDialog?.close();
+          render();
+          toast('Welcome! Here are groups near you.');
+          break;
+        }
+        mergeState(await api('/api/me', { method: 'PATCH', body: JSON.stringify(patch) }));
+        ui.onboarding = step + 1;
+        renderOnboarding();
+        break;
+      }
+      case 'ob-skip':
+        ui.onboarding = null;
+        obDialog?.close();
+        break;
+
       case 'toggle-friend': {
         const uid = t.dataset.uid;
-        state = await api(`/api/friends/${encodeURIComponent(uid)}/toggle`, { method: 'POST' });
+        mergeState(await api(`/api/friends/${encodeURIComponent(uid)}/toggle`, { method: 'POST' }));
         if (sheet.open) openProfileSheet(uid);
         render();
         toast(isFriend(uid) ? `Added ${person(uid).name} as a familiar face.` : `Removed ${person(uid).name} from friends.`);
         break;
       }
+
       case 'join':
-        if (!g) break;
-        state = await api(`/api/groups/${encodeURIComponent(g.id)}/join`, { method: 'POST' });
-        render();
-        toast(`You joined ${g.name}. Say hello in the chat.`);
-        break;
+        if (!g) break; {
+          const res = await api(`/api/groups/${encodeURIComponent(g.id)}/join`, { method: 'POST' });
+          const showIntro = res.showIntro;
+          mergeState(res);
+          render();
+          if (showIntro) {
+            document.getElementById('sheet-title').textContent = 'Say hello 👋';
+            document.getElementById('sheet-body').innerHTML = `<div class="intro-form-wrap">
+              <p>Introduce yourself to the group. Others will see this in the chat.</p>
+              <form id="intro-form" data-id="${g.id}">
+                <div class="intro-row">
+                  <input type="text" id="intro-text" maxlength="200" placeholder="Hi, I'm ${esc(state.me.name)} — just moved here from…" required>
+                  <button class="btn btn-primary btn-sm" type="submit">Post</button>
+                </div>
+              </form>
+              <button type="button" class="btn-link" data-act="close-sheet">Skip for now</button>
+            </div>`;
+            sheet.showModal();
+            document.getElementById('intro-text')?.focus();
+          } else {
+            toast(`You joined ${g.name}. Say hello in the chat.`);
+          }
+          break;
+        }
+
       case 'rsvp':
-        if (!g) break;
-        state = await api(`/api/groups/${encodeURIComponent(g.id)}/rsvp`, { method: 'POST', body: JSON.stringify({ status: t.dataset.val }) });
-        render();
-        toast(t.dataset.val === 'going' ? `See you ${fmt(nextSession(g), { weekday: 'long' })}.` : "Skipping this week. You're still in the group.");
-        break;
+        if (!g) break; {
+          const res = await api(`/api/groups/${encodeURIComponent(g.id)}/rsvp`, { method: 'POST', body: JSON.stringify({ status: t.dataset.val }) });
+          const milestone = res.milestone;
+          mergeState(res);
+          render();
+          if (milestone) {
+            toast(`${milestone} meetup${milestone > 1 ? 's' : ''} in total — you're becoming a regular!`);
+          } else {
+            toast(t.dataset.val === 'going' ? `See you ${fmt(nextSession(g), { weekday: 'long' })}.` : "Skipping this week. You're still in the group.");
+          }
+          break;
+        }
+
       case 'leave':
         ui.leave = true; render();
         main.querySelector('[data-key="leave-yes"]')?.focus();
@@ -699,28 +909,95 @@ document.addEventListener('click', async e => {
         break;
       case 'leave-confirm':
         if (!g) break;
-        state = await api(`/api/groups/${encodeURIComponent(g.id)}/leave`, { method: 'POST' });
+        mergeState(await api(`/api/groups/${encodeURIComponent(g.id)}/leave`, { method: 'POST' }));
         ui.leave = false; render();
         toast(`You left ${g.name}.`);
         break;
+
       case 'plan-toggle':
         ui.plan = !ui.plan; render();
         main.querySelector(ui.plan ? '#plan-what' : '[data-key="plan-open"]')?.focus();
         break;
       case 'plan-in':
         if (!g) break;
-        state = await api(`/api/groups/${encodeURIComponent(g.id)}/plans/${encodeURIComponent(t.dataset.mid)}/toggle`, { method: 'POST' });
+        mergeState(await api(`/api/groups/${encodeURIComponent(g.id)}/plans/${encodeURIComponent(t.dataset.mid)}/toggle`, { method: 'POST' }));
         render();
         break;
+
       case 'arrive':
         if (!g) break;
-        state = await api(`/api/groups/${encodeURIComponent(g.id)}/arrive`, { method: 'POST' });
+        mergeState(await api(`/api/groups/${encodeURIComponent(g.id)}/arrive`, { method: 'POST' }));
         render();
         toast(state.groups.find(x => x.id === g.id)?.arrived[state.me.id] ? 'Checked in — others can see you\'re here.' : 'Check-in removed.');
         break;
+
+      case 'waitlist':
+        if (!g) break; {
+          mergeState(await api(`/api/groups/${encodeURIComponent(g.id)}/waitlist`, { method: 'POST' }));
+          render();
+          const updated = byId(g.id);
+          toast(isOnWaitlist(updated) ? `On the waitlist — you're position ${updated?.waitlistPos}.` : 'Removed from the waitlist.');
+          break;
+        }
+
+      case 'rate':
+        if (!g) break; {
+          const rating = Number(t.dataset.val);
+          mergeState(await api(`/api/groups/${encodeURIComponent(g.id)}/rate`, { method: 'POST', body: JSON.stringify({ rating }) }));
+          render();
+          toast(rating === 1 ? 'Thanks — glad you enjoyed it!' : 'Thanks for the feedback.');
+          break;
+        }
+
+      case 'pause':
+        if (!g) break; {
+          mergeState(await api(`/api/groups/${encodeURIComponent(g.id)}/pause`, { method: 'POST' }));
+          render();
+          const updatedG = byId(g.id);
+          toast(isPaused(updatedG) ? 'Group paused for 2 weeks.' : 'Group resumed.');
+          break;
+        }
+
+      case 'transfer':
+        if (!g) break; {
+          const nonHostMembers = g.members.filter(id => id !== state.me.id);
+          document.getElementById('sheet-title').textContent = 'Transfer hosting';
+          document.getElementById('sheet-body').innerHTML = `<div class="profile-modal">
+            <p class="muted" style="margin-bottom:16px">Pick a member to become the new host. This cannot be undone.</p>
+            <ul class="members">${nonHostMembers.map(id => {
+              const p = person(id);
+              return `<li class="member"><button type="button" class="member-btn" data-act="transfer-confirm" data-id="${g.id}" data-uid="${id}">${avatar(id)}<span class="member-text"><strong>${esc(p?.name)}</strong><span>${esc(p?.since)}</span></span></button></li>`;
+            }).join('')}</ul>
+          </div>`;
+          sheet.showModal();
+          break;
+        }
+
+      case 'transfer-confirm': {
+        const gid = t.dataset.id;
+        const uid = t.dataset.uid;
+        const target = person(uid);
+        sheet.close();
+        mergeState(await api(`/api/groups/${encodeURIComponent(gid)}/transfer`, { method: 'POST', body: JSON.stringify({ newHost: uid }) }));
+        render();
+        toast(`${target?.name} is now hosting the group.`);
+        break;
+      }
+
+      case 'wish': {
+        const cat = t.dataset.cat;
+        const area = t.dataset.area;
+        mergeState(await api('/api/wishlist', { method: 'POST', body: JSON.stringify({ cat, area }) }));
+        if (sheet.open) renderActivitySheet();
+        else render();
+        const isWished = state.wishes?.some(w => w.cat === cat && w.area === area);
+        toast(isWished ? 'Wish added — others can see demand is here.' : 'Wish removed.');
+        break;
+      }
+
       case 'reset':
-        state = await api('/api/reset', { method: 'POST' });
-        Object.assign(ui, { cat: 'all', lang: 'any', dist: 'any', sort: 'suggested', friendsOnly: false, view: 'list', pin: null, leave: false, plan: false });
+        mergeState(await api('/api/reset', { method: 'POST' }));
+        Object.assign(ui, { cat: 'all', lang: 'any', dist: 'any', sort: 'suggested', friendsOnly: false, newHereOnly: false, view: 'list', pin: null, leave: false, plan: false });
         lastKey = '';
         render();
         toast('Demo data reset.');
@@ -759,15 +1036,23 @@ document.addEventListener('submit', async e => {
     if (f.id === 'chat-form') {
       const text = f.elements.text.value.trim();
       if (!text) return;
-      state = await api(`/api/groups/${encodeURIComponent(f.dataset.id)}/messages`, { method: 'POST', body: JSON.stringify({ text }) });
+      mergeState(await api(`/api/groups/${encodeURIComponent(f.dataset.id)}/messages`, { method: 'POST', body: JSON.stringify({ text }) }));
       render();
       document.getElementById('chat-input')?.focus({ preventScroll: true });
+    } else if (f.id === 'intro-form') {
+      const textEl = document.getElementById('intro-text');
+      const text = textEl?.value.trim();
+      if (!text) return;
+      mergeState(await api(`/api/groups/${encodeURIComponent(f.dataset.id)}/messages`, { method: 'POST', body: JSON.stringify({ text }) }));
+      sheet.close();
+      render();
+      toast(`Said hello to the group!`);
     } else if (f.id === 'plan-form') {
       const what = f.elements.what.value.trim();
       const whenTxt = f.elements.when.value.trim();
       if (!what) { f.elements.what.reportValidity(); return; }
       if (!whenTxt) { f.elements.when.reportValidity(); return; }
-      state = await api(`/api/groups/${encodeURIComponent(f.dataset.id)}/messages`, { method: 'POST', body: JSON.stringify({ plan: { what, when: whenTxt } }) });
+      mergeState(await api(`/api/groups/${encodeURIComponent(f.dataset.id)}/messages`, { method: 'POST', body: JSON.stringify({ plan: { what, when: whenTxt } }) }));
       ui.plan = false;
       render();
       toast('Plan shared with the group.');
@@ -785,12 +1070,12 @@ document.addEventListener('submit', async e => {
         return;
       }
       const res = await api('/api/groups', { method: 'POST', body: JSON.stringify(g) });
-      state = res.state;
+      mergeState(res.state);
       location.hash = 'group-' + res.id;
       toast("Group started. You're the host.");
     } else if (f.id === 'profile-form') {
       const fd = new FormData(f);
-      state = await api('/api/me', {
+      mergeState(await api('/api/me', {
         method: 'PATCH',
         body: JSON.stringify({
           name: fd.get('name'),
@@ -802,7 +1087,7 @@ document.addEventListener('submit', async e => {
           languages: fd.getAll('languages'),
           availability: fd.getAll('availability').map(Number)
         })
-      });
+      }));
       render();
       toast('Profile updated. Suggestions refreshed.');
     }

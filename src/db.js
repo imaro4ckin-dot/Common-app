@@ -43,6 +43,7 @@ export function createDb(dbPath = ':memory:') {
       friends_only INTEGER NOT NULL DEFAULT 0,
       lat REAL NOT NULL,
       lng REAL NOT NULL,
+      paused_until TEXT,
       created_at INTEGER NOT NULL
     );
 
@@ -85,6 +86,34 @@ export function createDb(dbPath = ':memory:') {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (friend_id) REFERENCES users(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS waitlist (
+      group_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      joined_at INTEGER NOT NULL,
+      PRIMARY KEY (group_id, user_id),
+      FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS meetup_ratings (
+      group_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      week_ts INTEGER NOT NULL,
+      rating INTEGER NOT NULL,
+      PRIMARY KEY (group_id, user_id, week_ts),
+      FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS wishlist (
+      user_id TEXT NOT NULL,
+      cat TEXT NOT NULL,
+      area TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, cat, area),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
   `);
 
   const count = db.prepare('SELECT COUNT(*) AS c FROM users').get().c;
@@ -98,11 +127,20 @@ export function createDb(dbPath = ':memory:') {
     db.exec('ALTER TABLE memberships ADD COLUMN arrived_at INTEGER;');
   }
 
+  // Migrate: add paused_until if missing (for existing DBs created before this column)
+  const gcols = db.prepare("PRAGMA table_info(groups)").all().map(c => c.name);
+  if (!gcols.includes('paused_until')) {
+    db.exec('ALTER TABLE groups ADD COLUMN paused_until TEXT;');
+  }
+
   return db;
 }
 
 export function seedDatabase(db) {
   db.exec(`
+    DELETE FROM waitlist;
+    DELETE FROM meetup_ratings;
+    DELETE FROM wishlist;
     DELETE FROM plan_participants;
     DELETE FROM messages;
     DELETE FROM memberships;
@@ -138,8 +176,8 @@ export function seedDatabase(db) {
   }
 
   const insertGroup = db.prepare(`
-    INSERT INTO groups (id, name, cat, date, time, duration, weekly, desc, place, area, spot, lang, cost, size, host, friends_only, lat, lng, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO groups (id, name, cat, date, time, duration, weekly, desc, place, area, spot, lang, cost, size, host, friends_only, lat, lng, paused_until, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertMember = db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, ?, ?)');
   const insertMsg = db.prepare('INSERT INTO messages (group_id, user_id, sys, text, plan_what, plan_when, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
@@ -150,7 +188,7 @@ export function seedDatabase(db) {
     insertGroup.run(
       g.id, g.name, g.cat, date, g.time, g.duration, g.weekly ? 1 : 0,
       g.desc, g.place, g.area, g.spot, JSON.stringify(g.lang), g.cost, g.size,
-      g.host, g.friendsOnly ? 1 : 0, g.lat, g.lng, now + idx
+      g.host, g.friendsOnly ? 1 : 0, g.lat, g.lng, null, now + idx
     );
     g.members.forEach((uid, mIdx) => {
       insertMember.run(g.id, uid, g.rsvp[uid] || null, now + mIdx);
@@ -206,10 +244,10 @@ export function computeSuggestion(group, me, friendIds) {
   let score = 0;
 
   const catLabel = CATS[group.cat]?.label || group.cat;
-  const interestMatch = me.interests.some(
+  const matchedInterestCount = me.interests.filter(
     i => i.toLowerCase() === catLabel.toLowerCase() || group.name.toLowerCase().includes(i.toLowerCase())
-  );
-  if (interestMatch) {
+  ).length;
+  if (matchedInterestCount > 0) {
     score += 40;
     reasons.push(`Matches ${catLabel}`);
   }
@@ -242,7 +280,15 @@ export function computeSuggestion(group, me, friendIds) {
     reasons.push(`${friendsInGroup.length} familiar ${friendsInGroup.length === 1 ? 'face' : 'faces'}`);
   }
 
-  return { score, reasons: reasons.slice(0, 2) };
+  return { score, reasons: reasons.slice(0, 2), matchedInterestCount };
+}
+
+function getMondayTs(ts) {
+  const d = new Date(ts);
+  const day = d.getDay();
+  d.setDate(d.getDate() - ((day + 6) % 7));
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 }
 
 export function getFullState(db, currentUserId = 'me') {
@@ -268,10 +314,49 @@ export function getFullState(db, currentUserId = 'me') {
   const friends = friendRows.map(r => r.friend_id);
   const friendSet = new Set(friends);
 
+  // Build friendsOf map for mutual friend computation
+  const allFriendRows = db.prepare('SELECT user_id, friend_id FROM friendships').all();
+  const friendsOf = {};
+  for (const { user_id, friend_id } of allFriendRows) {
+    if (!friendsOf[user_id]) friendsOf[user_id] = new Set();
+    friendsOf[user_id].add(friend_id);
+  }
+
+  // Add mutualFriendCount to each person
+  for (const p of Object.values(people)) {
+    const theirFriends = friendsOf[p.id] || new Set();
+    let count = 0;
+    for (const fid of friendSet) {
+      if (theirFriends.has(fid)) count++;
+    }
+    p.mutualFriendCount = count;
+  }
+
   const groupRows = db.prepare('SELECT * FROM groups ORDER BY created_at DESC').all();
-  const memberRows = db.prepare('SELECT group_id, user_id, rsvp, arrived_at FROM memberships ORDER BY joined_at ASC').all();
+  const memberRows = db.prepare('SELECT group_id, user_id, rsvp, arrived_at, joined_at FROM memberships ORDER BY joined_at ASC').all();
   const msgRows = db.prepare('SELECT * FROM messages ORDER BY id ASC').all();
   const planRows = db.prepare('SELECT message_id, user_id FROM plan_participants').all();
+  const waitlistRows = db.prepare('SELECT group_id, user_id, joined_at FROM waitlist ORDER BY joined_at ASC').all();
+  const ratingRows = db.prepare('SELECT group_id, user_id, week_ts, rating FROM meetup_ratings').all();
+  const wishRows = db.prepare('SELECT cat, area FROM wishlist WHERE user_id = ?').all(me.id);
+  const allWishRows = db.prepare('SELECT cat, area FROM wishlist').all();
+
+  // Current week's Monday for rating lookup
+  const thisWeekMonday = getMondayTs(Date.now());
+
+  // Build ratings map for this week
+  const ratingsMap = {};
+  for (const r of ratingRows) {
+    if (r.user_id === currentUserId && r.week_ts === thisWeekMonday) {
+      ratingsMap[r.group_id] = r.rating;
+    }
+  }
+
+  // Build wish counts per cat
+  const wishCounts = {};
+  for (const w of allWishRows) {
+    wishCounts[w.cat] = (wishCounts[w.cat] || 0) + 1;
+  }
 
   const planMap = new Map();
   for (const p of planRows) {
@@ -279,14 +364,18 @@ export function getFullState(db, currentUserId = 'me') {
     planMap.get(p.message_id).push(p.user_id);
   }
 
+  const nowTs = Date.now();
+
   const groups = groupRows.map(g => {
     const gMembers = memberRows.filter(m => m.group_id === g.id);
     const members = gMembers.map(m => m.user_id);
     const rsvp = {};
     const arrived = {};
+    const joinedAt = {};
     for (const m of gMembers) {
       if (m.rsvp) rsvp[m.user_id] = m.rsvp;
       if (m.arrived_at) arrived[m.user_id] = m.arrived_at;
+      joinedAt[m.user_id] = m.joined_at;
     }
 
     const chat = msgRows
@@ -303,6 +392,32 @@ export function getFullState(db, currentUserId = 'me') {
         }
         return { id: m.id, from: m.user_id, text: m.text };
       });
+
+    // Preview chat for non-members: last 2 non-system text messages
+    const isCurrentMember = members.includes(currentUserId);
+    const previewChat = isCurrentMember ? null : chat
+      .filter(m => !m.sys && m.text)
+      .slice(-2)
+      .map(m => ({ from: m.from, text: m.text }));
+
+    // Waitlist for this group
+    const gWaitlist = waitlistRows.filter(w => w.group_id === g.id).map(w => w.user_id);
+    const waitlistPosIdx = gWaitlist.indexOf(currentUserId);
+    const waitlistPos = waitlistPosIdx >= 0 ? waitlistPosIdx + 1 : 0;
+
+    // Tenure per member (weeks since joined)
+    const membersMeta = gMembers.map(m => ({
+      userId: m.user_id,
+      weeksIn: Math.floor((nowTs - m.joined_at) / (7 * 86400000)),
+      mutualFriends: (() => {
+        const theirFriends = friendsOf[m.user_id] || new Set();
+        let count = 0;
+        for (const fid of friendSet) {
+          if (theirFriends.has(fid)) count++;
+        }
+        return count;
+      })()
+    }));
 
     const parsed = {
       id: g.id,
@@ -323,10 +438,17 @@ export function getFullState(db, currentUserId = 'me') {
       friendsOnly: Boolean(g.friends_only),
       lat: g.lat,
       lng: g.lng,
+      pausedUntil: g.paused_until || null,
       members,
       rsvp,
       arrived,
-      chat
+      joinedAt,
+      chat,
+      previewChat,
+      waitlist: gWaitlist,
+      waitlistPos,
+      myRating: ratingsMap[g.id] ?? null,
+      membersMeta
     };
 
     const suggestion = computeSuggestion(parsed, me, friendSet);
@@ -335,7 +457,8 @@ export function getFullState(db, currentUserId = 'me') {
       ...parsed,
       distKm: Number(distKm.toFixed(2)),
       matchScore: suggestion.score,
-      matchReasons: suggestion.reasons
+      matchReasons: suggestion.reasons,
+      matchedInterestCount: suggestion.matchedInterestCount
     };
   });
 
@@ -348,6 +471,8 @@ export function getFullState(db, currentUserId = 'me') {
     me,
     people,
     friends,
-    groups: visibleGroups
+    groups: visibleGroups,
+    wishes: wishRows,
+    wishCounts
   };
 }

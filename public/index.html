@@ -36,6 +36,15 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
+  <dialog class="onboarding-dialog" id="onboarding" aria-labelledby="ob-title" aria-modal="true">
+    <div class="ob-inner">
+      <div class="ob-steps" id="ob-dots" aria-hidden="true"></div>
+      <h2 id="ob-title" class="ob-heading"></h2>
+      <div id="ob-body" class="ob-body"></div>
+      <div class="ob-footer" id="ob-footer"></div>
+    </div>
+  </dialog>
+
   <script type="module" src="/app.js"></script>
 </body>
 </html>
