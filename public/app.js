@@ -790,13 +790,86 @@ function editGroupView(g) {
   </div>`;
 }
 
+function peopleView() {
+  const me = state.me;
+  const friendSet = new Set(state.friends);
+  const myGroupIds = new Set(joinedGroups().map(g => g.id));
+
+  // Build a map of groupId → group for quick lookup
+  const groupById = {};
+  for (const g of state.groups) groupById[g.id] = g;
+
+  // For each person, compute shared groups (both are members) and shared interests
+  const others = Object.values(state.people).filter(p => p.id !== me.id);
+  const scored = others.map(p => {
+    const sharedGroups = state.groups.filter(g => myGroupIds.has(g.id) && g.members.includes(p.id));
+    const sharedInterests = me.interests.filter(i => p.interests.includes(i));
+    const isFriend = friendSet.has(p.id);
+    // scoring: friends-of-friends > shared groups > shared interests > new here
+    let score = 0;
+    if (isFriend) score += 100;
+    score += sharedGroups.length * 30;
+    score += sharedInterests.length * 10;
+    if (p.newHere) score += 5;
+    if (p.area === me.area) score += 8;
+    return { p, sharedGroups, sharedInterests, isFriend, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  const inMyGroups = scored.filter(x => x.sharedGroups.length > 0);
+  const newHereMatch = scored.filter(x => x.sharedGroups.length === 0 && (x.p.newHere || x.sharedInterests.length > 0));
+  const others2 = scored.filter(x => x.sharedGroups.length === 0 && !x.p.newHere && x.sharedInterests.length === 0);
+
+  function personCard({ p, sharedGroups, sharedInterests, isFriend }) {
+    const friendBtn = p.id === me.id ? '' : `<button type="button" class="btn btn-sm ${isFriend ? 'btn-going' : 'btn-secondary'}" data-act="toggle-friend" data-uid="${p.id}">${svg('heart', 14)}${isFriend ? 'Familiar face' : 'Add'}</button>`;
+    const groupLine = sharedGroups.length
+      ? `<span class="muted" style="font-size:13px">${sharedGroups.map(g => esc(g.name)).join(' · ')}</span>`
+      : '';
+    const interestLine = sharedInterests.length
+      ? `<div class="tags" style="margin-top:4px">${sharedInterests.slice(0, 3).map(i => `<span class="tag" style="font-size:12px">${esc(i)}</span>`).join('')}</div>`
+      : '';
+    return `<li class="member people-card">
+      <button type="button" class="member-btn" data-act="profile" data-uid="${p.id}">
+        ${avatar(p.id)}
+        <span class="member-text">
+          <strong>${esc(p.name)}${p.verified ? `<span class="badge-verified">${svg('shield', 11)}Verified</span>` : ''}${p.newHere ? '<span class="badge-new">New here</span>' : ''}</strong>
+          <span>${esc(p.since)} · ${esc(p.area)}</span>
+          ${groupLine}
+        </span>
+      </button>
+      ${interestLine}
+      <div class="people-actions">${friendBtn}</div>
+    </li>`;
+  }
+
+  function section(title, subtitle, items) {
+    if (!items.length) return '';
+    return `<section class="panel" aria-labelledby="ph-${title.replace(/\s/g, '')}">
+      <div class="h-row"><h2 id="ph-${title.replace(/\s/g, '')}">${title}</h2><span class="muted">${subtitle}</span></div>
+      <ul class="members">${items.map(personCard).join('')}</ul>
+    </section>`;
+  }
+
+  const intro = `<div class="page-head"><h1 tabindex="-1">People</h1><p class="lead">Others in Heidelberg — in your groups, new here, or sharing your interests.</p></div>`;
+
+  if (!others.length) {
+    return `${intro}<div class="panel empty"><h2>No other members yet</h2><p class="muted">Be the first to join or start a group.</p></div>`;
+  }
+
+  return `${intro}<div class="people-layout">
+    ${section('In your groups', `${inMyGroups.length} people`, inMyGroups)}
+    ${section('New here & matching interests', `${newHereMatch.length} people`, newHereMatch)}
+    ${others2.length ? section('Everyone else', `${others2.length} people`, others2) : ''}
+  </div>`;
+}
+
 /* Router & Render */
 const NAV = [
   ['discover', 'compass', 'Discover', 'Discover'],
   ['my-groups', 'users', 'My groups', 'My groups'],
+  ['people', 'heart', 'People', 'People'],
   ['calendar', 'calendar', 'Calendar', 'Calendar'],
   ['profile', 'user', 'Profile', 'Profile'],
-  ['start-group', 'plus', 'Start a group', 'Start']
 ];
 
 function route() {
@@ -810,7 +883,7 @@ function route() {
     if (g && g.host === state.me?.id) return { name: 'edit-group', g };
     return { name: 'discover' };
   }
-  return { name: ['my-groups', 'calendar', 'profile', 'start-group'].includes(h) ? h : 'discover' };
+  return { name: ['my-groups', 'people', 'calendar', 'profile', 'start-group'].includes(h) ? h : 'discover' };
 }
 
 const main = document.getElementById('main');
@@ -848,7 +921,7 @@ function render() {
   const focusKey = !changed && active && active.dataset ? active.dataset.key : null;
   const n = joinedGroups().length;
   const totalUnread = joinedGroups().reduce((sum, g) => sum + unreadCount(g), 0);
-  const navTab = r.name === 'group' ? 'discover' : r.name;
+  const navTab = r.name === 'group' || r.name === 'edit-group' ? 'discover' : r.name;
 
   document.getElementById('nav').innerHTML = NAV.map(([id, icon, long, short]) =>
     `<a href="#${id}" class="${id === 'start-group' ? 'nav-start' : ''}"${id === navTab ? ' aria-current="page"' : ''}>${svg(icon, 18)}<span class="lbl-long">${long}</span><span class="lbl-short">${short}</span>${id === 'my-groups' ? (totalUnread ? `<span class="nav-count" aria-label="${totalUnread} unread messages">${totalUnread}</span>` : n ? `<span class="nav-count" aria-label="${n} groups">${n}</span>` : '') : ''}</a>`
@@ -857,6 +930,7 @@ function render() {
   main.innerHTML = r.name === 'group' ? groupView(r.g)
     : r.name === 'edit-group' ? editGroupView(r.g)
     : r.name === 'my-groups' ? myGroupsView()
+    : r.name === 'people' ? peopleView()
     : r.name === 'calendar' ? calendarView()
     : r.name === 'profile' ? profileView()
     : r.name === 'start-group' ? startView()
