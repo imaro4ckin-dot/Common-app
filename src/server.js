@@ -168,7 +168,46 @@ export function createApp(db) {
         return json(res, 200, getFullState(db, currentUserId));
       }
 
-      const groupMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)\/(join|leave|rsvp|messages|calendar\.ics|arrive|waitlist|rate|pause|transfer)$/i);
+      // PATCH /api/groups/:id — host-only group edit
+      const groupEditMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)$/i);
+      if (groupEditMatch && method === 'PATCH') {
+        const [, groupId] = groupEditMatch;
+        const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
+        if (!group) return json(res, 404, { error: 'Group not found' });
+        if (group.host !== currentUserId) return json(res, 403, { error: 'Only the host can edit the group' });
+
+        const body = await readBody(req);
+        const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : group.name;
+        const desc = typeof body.desc === 'string' ? body.desc.trim().slice(0, 200) : group.desc;
+        const place = typeof body.place === 'string' && body.place.trim() ? body.place.trim().slice(0, 60) : group.place;
+        const spot = typeof body.spot === 'string' ? body.spot.trim().slice(0, 90) : group.spot;
+        const area = AREAS[body.area] ? body.area : group.area;
+        const date = typeof body.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : group.date;
+        const time = typeof body.time === 'string' && /^\d{2}:\d{2}$/.test(body.time) ? body.time : group.time;
+        const duration = [30, 45, 60, 90, 120].includes(Number(body.duration)) ? Number(body.duration) : group.duration;
+        const weekly = typeof body.weekly === 'boolean' ? (body.weekly ? 1 : 0) : group.weekly;
+        const lang = Array.isArray(body.lang) && body.lang.length ? body.lang.filter(l => LANGS.includes(l)) : JSON.parse(group.lang);
+        const cost = Number.isFinite(Number(body.cost)) ? Math.max(0, Math.min(50, Math.round(Number(body.cost)))) : group.cost;
+        const friendsOnly = typeof body.friendsOnly === 'boolean' ? (body.friendsOnly ? 1 : 0) : group.friends_only;
+        const memberCount = db.prepare('SELECT COUNT(*) AS c FROM memberships WHERE group_id = ?').get(groupId).c;
+        const rawSize = Math.max(3, Math.min(12, Number(body.size) || group.size));
+        const size = Math.max(rawSize, memberCount);
+        const clientLat = Number(body.lat);
+        const clientLng = Number(body.lng);
+        const lat = Number.isFinite(clientLat) && clientLat > 49.3 && clientLat < 49.5 ? clientLat : group.lat;
+        const lng = Number.isFinite(clientLng) && clientLng > 8.5 && clientLng < 8.9 ? clientLng : group.lng;
+
+        db.prepare(`
+          UPDATE groups
+          SET name = ?, desc = ?, place = ?, area = ?, spot = ?, date = ?, time = ?, duration = ?,
+              weekly = ?, lang = ?, cost = ?, size = ?, friends_only = ?, lat = ?, lng = ?
+          WHERE id = ?
+        `).run(name, desc, place, area, spot, date, time, duration, weekly, JSON.stringify(lang), cost, size, friendsOnly, lat, lng, groupId);
+
+        return json(res, 200, getFullState(db, currentUserId));
+      }
+
+      const groupMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)\/(join|leave|rsvp|messages|calendar\.ics|arrive|waitlist|rate|pause|transfer|kick|delete)$/i);
       if (groupMatch) {
         const [, groupId, action] = groupMatch;
         const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
@@ -194,8 +233,11 @@ export function createApp(db) {
           if (members.length >= group.size) return json(res, 409, { error: 'This group is full' });
 
           db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, NULL, ?)').run(groupId, currentUserId, Date.now());
-          // Remove from waitlist if present
           db.prepare('DELETE FROM waitlist WHERE group_id = ? AND user_id = ?').run(groupId, currentUserId);
+          const joiner = db.prepare('SELECT name FROM users WHERE id = ?').get(currentUserId);
+          db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
+            groupId, null, `${joiner?.name || 'Someone'} joined the group.`, Date.now()
+          );
           return json(res, 200, { ...getFullState(db, currentUserId), showIntro: true });
         }
 
@@ -348,6 +390,33 @@ export function createApp(db) {
           db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
             groupId, null, `${targetUser.name} is now hosting the group.`, Date.now()
           );
+          return json(res, 200, getFullState(db, currentUserId));
+        }
+
+        if (action === 'kick' && method === 'POST') {
+          if (group.host !== currentUserId) return json(res, 403, { error: 'Only the host can remove members' });
+          const body = await readBody(req);
+          const targetId = String(body.userId || '').trim();
+          if (!targetId) return json(res, 400, { error: 'userId is required' });
+          if (targetId === group.host) return json(res, 400, { error: 'Cannot remove the host' });
+          const isMemberCheck = db.prepare('SELECT 1 FROM memberships WHERE group_id = ? AND user_id = ?').get(groupId, targetId);
+          if (!isMemberCheck) return json(res, 400, { error: 'User is not a member' });
+
+          db.prepare('DELETE FROM memberships WHERE group_id = ? AND user_id = ?').run(groupId, targetId);
+          db.prepare(`
+            DELETE FROM plan_participants
+            WHERE user_id = ? AND message_id IN (SELECT id FROM messages WHERE group_id = ?)
+          `).run(targetId, groupId);
+          const kicked = db.prepare('SELECT name FROM users WHERE id = ?').get(targetId);
+          db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
+            groupId, null, `${kicked?.name || 'A member'} left the group.`, Date.now()
+          );
+          return json(res, 200, getFullState(db, currentUserId));
+        }
+
+        if (action === 'delete' && method === 'POST') {
+          if (group.host !== currentUserId) return json(res, 403, { error: 'Only the host can delete the group' });
+          db.prepare('DELETE FROM groups WHERE id = ?').run(groupId);
           return json(res, 200, getFullState(db, currentUserId));
         }
       }

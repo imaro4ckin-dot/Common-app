@@ -446,6 +446,9 @@ dialog.onboarding-dialog::backdrop { background: var(--backdrop); backdrop-filte
 .waitlist-section { margin-top: 20px; }
 .waitlist-pos { font-size: 13px; color: var(--muted); }
 
+/* ── Kick confirm inline ─────────────────────────────────────────── */
+.kick-confirm { display: inline-flex; gap: 6px; }
+
 /* ── Wish button in activity sheet ──────────────────────────────── */
 .wish-count { font-size: 11px; color: var(--accent); font-weight: 600; }
 .sheet-item-row { display: contents; }

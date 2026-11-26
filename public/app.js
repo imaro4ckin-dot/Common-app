@@ -24,6 +24,10 @@ const ui = {
   query: '',
   startLat: null,
   startLng: null,
+  editLat: null,
+  editLng: null,
+  deleteConfirm: false,
+  kickConfirm: null,
   onboarding: null
 };
 
@@ -418,6 +422,7 @@ function groupView(g) {
         ${arrivalBlock}
         ${ratingBlock}
         ${g.host === state.me.id ? `<div class="host-actions">
+          <a class="btn btn-secondary btn-sm" href="#edit-group-${g.id}">${svg('check', 14)}Edit group</a>
           <button type="button" class="btn btn-secondary btn-sm" data-act="pause" data-id="${g.id}" data-key="pause-btn">${svg('clock', 14)}${isPaused(g) ? 'Resume group' : 'Pause for 2 weeks'}</button>
           <button type="button" class="btn btn-secondary btn-sm" data-act="transfer" data-id="${g.id}" data-key="transfer-btn">${svg('users', 14)}Transfer hosting</button>
         </div>` : ''}
@@ -457,8 +462,16 @@ function groupView(g) {
         if (!p) return '';
         const r = g.rsvp[id];
         const meta = getMemberMeta(g, id);
+        const isHostViewing = g.host === state.me.id;
+        const canKick = isHostViewing && id !== state.me.id;
         const streakLabel = meta.weeksIn >= 2 ? `<span class="streak-label">Wk ${meta.weeksIn}</span>` : '';
-        return `<li class="member"><button type="button" class="member-btn" data-act="profile" data-uid="${id}">${avatar(id)}<span class="member-text"><strong>${esc(p.name)}${p.verified ? `<span class="badge-verified">${svg('shield', 11)}Verified</span>` : ''}${isFriend(id) ? '<span class="badge-friend">Friend</span>' : ''}${id === g.host ? '<span class="muted" style="font-weight:500;font-size:13px">· Host</span>' : ''}</strong><span>${esc(p.since)}${p.interests.length ? ' · ' + esc(p.interests.join(', ')) : ''}</span></span>${streakLabel}</button>${p.newHere && id !== state.me.id ? '<span class="badge-new">New here</span>' : ''}${member && r === 'going' ? `<span class="pill pill-going">${svg('check', 12)}Going</span>` : ''}</li>`;
+        const kickBtn = canKick && ui.kickConfirm !== id
+          ? `<button type="button" class="btn btn-secondary btn-sm" data-act="kick" data-id="${g.id}" data-uid="${id}" data-key="kick-${id}">Remove</button>`
+          : '';
+        const kickConfirmUI = canKick && ui.kickConfirm === id
+          ? `<span class="kick-confirm"><button type="button" class="btn btn-secondary btn-sm" data-act="kick-cancel" data-key="kick-cancel-${id}">Keep</button><button type="button" class="btn btn-primary btn-sm" data-act="kick-confirm" data-id="${g.id}" data-uid="${id}" data-key="kick-yes-${id}">Remove</button></span>`
+          : '';
+        return `<li class="member"><button type="button" class="member-btn" data-act="profile" data-uid="${id}">${avatar(id)}<span class="member-text"><strong>${esc(p.name)}${p.verified ? `<span class="badge-verified">${svg('shield', 11)}Verified</span>` : ''}${isFriend(id) ? '<span class="badge-friend">Friend</span>' : ''}${id === g.host ? '<span class="muted" style="font-weight:500;font-size:13px">· Host</span>' : ''}</strong><span>${esc(p.since)}${p.interests.length ? ' · ' + esc(p.interests.join(', ')) : ''}</span></span>${streakLabel}</button>${p.newHere && id !== state.me.id ? '<span class="badge-new">New here</span>' : ''}${member && r === 'going' ? `<span class="pill pill-going">${svg('check', 12)}Going</span>` : ''}${kickBtn}${kickConfirmUI}</li>`;
       }).join('')}</ul>
     </section>
   </aside>`;
@@ -489,7 +502,13 @@ function groupView(g) {
       : `<div class="g-leave"><button type="button" class="btn-link" data-act="leave" data-key="leave">Leave group</button></div>`;
   }
 
-  return `<a class="back" href="#discover">${svg('back', 18)}All groups</a>${pauseBanner}<div class="group-layout">${head}${act}${side}${chat}${leave}</div>`;
+  const deleteSection = g.host === state.me.id
+    ? (ui.deleteConfirm
+      ? `<div class="g-leave"><div class="confirm" role="group" aria-labelledby="del-q"><p id="del-q">Delete <strong>${esc(g.name)}</strong>? This cannot be undone — all members will lose access.</p><button type="button" class="btn btn-primary btn-sm" data-act="delete-confirm" data-id="${g.id}" data-key="delete-yes">Delete group</button><button type="button" class="btn btn-secondary btn-sm" data-act="delete-cancel" data-key="delete-no">Cancel</button></div></div>`
+      : `<div class="g-leave"><button type="button" class="btn-link" data-act="delete-group" data-id="${g.id}" data-key="delete-group">Delete group</button></div>`)
+    : '';
+
+  return `<a class="back" href="#discover">${svg('back', 18)}All groups</a>${pauseBanner}<div class="group-layout">${head}${act}${side}${chat}${leave}${deleteSection}</div>`;
 }
 
 function rsvpSeg(g, small) {
@@ -687,6 +706,90 @@ function updatePreview() {
   if (p && g) p.innerHTML = cardHTML(g, true);
 }
 
+function formEditGroup(g) {
+  const f = document.getElementById('edit-form');
+  if (!f) return null;
+  const fd = new FormData(f);
+  const paid = fd.get('cost') === 'paid';
+  const langsPicked = fd.getAll('lang');
+  const lat = ui.editLat || g.lat;
+  const lng = ui.editLng || g.lng;
+  let area = g.area;
+  let bestD = Infinity;
+  for (const [name, [aLat, aLng]] of Object.entries(AREAS)) {
+    const d = (lat - aLat) ** 2 + (lng - aLng) ** 2;
+    if (d < bestD) { bestD = d; area = name; }
+  }
+  return {
+    id: 'preview',
+    name: String(fd.get('name') || '').trim() || g.name,
+    cat: g.cat,
+    desc: String(fd.get('desc') || '').trim() || g.desc,
+    date: fd.get('date') || g.date,
+    time: fd.get('time') || g.time,
+    duration: Number(fd.get('duration')) || g.duration,
+    weekly: fd.get('weekly') === 'on',
+    place: String(fd.get('place') || '').trim() || g.place,
+    area, lat, lng,
+    spot: String(fd.get('spot') || '').trim() || g.spot,
+    lang: langsPicked.length ? langsPicked : g.lang,
+    cost: paid ? Math.max(1, Math.min(50, Number(fd.get('amount')) || 5)) : 0,
+    size: Number(fd.get('size')) || g.size,
+    friendsOnly: fd.get('friendsOnly') === 'on',
+    host: state.me.id,
+    members: g.members,
+    rsvp: g.rsvp,
+    distKm: g.distKm,
+    matchedInterestCount: g.matchedInterestCount,
+    chat: g.chat
+  };
+}
+
+function updateEditPreview() {
+  const p = document.getElementById('e-preview');
+  const r = route();
+  if (r.name !== 'edit-group' || !r.g) return;
+  const g = formEditGroup(r.g);
+  if (p && g) p.innerHTML = cardHTML(g, true);
+}
+
+function editGroupView(g) {
+  return `<a class="back" href="#group-${g.id}">${svg('back', 18)}Back to group</a>
+  <div class="page-head"><h1 tabindex="-1">Edit group</h1><p class="lead">Changes are visible to all members immediately.</p></div>
+  <div class="form-layout">
+    <form id="edit-form" data-id="${g.id}" novalidate>
+      <fieldset><legend>What you'll do</legend>
+        <div class="field"><label for="e-name">Group name</label><input type="text" id="e-name" name="name" maxlength="60" value="${esc(g.name)}" required></div>
+        <div class="field"><label for="e-desc">A line about it <span class="hint">(optional)</span></label><textarea id="e-desc" name="desc" maxlength="200">${esc(g.desc)}</textarea></div>
+      </fieldset>
+      <fieldset><legend>When</legend>
+        <div class="row2"><div class="field"><label for="e-date">Next meetup date</label><input type="date" id="e-date" name="date" min="${ymd(new Date())}" value="${g.date}" required></div><div class="field"><label for="e-time">Start time</label><input type="time" id="e-time" name="time" value="${g.time}" required></div></div>
+        <div class="row2"><div class="field"><label for="e-dur">Duration</label><select class="input" id="e-dur" name="duration">${[30, 45, 60, 90, 120].map(m => `<option value="${m}"${m === g.duration ? ' selected' : ''}>${m} minutes</option>`).join('')}</select></div>
+        <div class="field"><span class="label">Repeat</span><label class="check-row" for="e-weekly"><input type="checkbox" id="e-weekly" name="weekly"${g.weekly ? ' checked' : ''}>Every week, same time</label></div></div>
+      </fieldset>
+      <fieldset><legend>Where</legend>
+        <div class="field"><label for="e-place">Meeting place name</label><input type="text" id="e-place" name="place" maxlength="60" value="${esc(g.place)}" required autocomplete="off"></div>
+        <div class="loc-search-row"><input type="text" id="e-loc-search" class="input" placeholder="Search for the address or place…" autocomplete="off"><button type="button" id="e-loc-btn" class="btn btn-secondary">Search</button></div>
+        <ul id="e-loc-results" class="loc-results" hidden></ul>
+        <div id="e-loc-map" style="height:240px;border-radius:var(--r-md);border:1px solid var(--line);overflow:hidden;margin:8px 0 4px;"></div>
+        <p class="hint">Click the map to change the meeting spot.</p>
+        <input type="hidden" id="e-lat" name="lat" value="${g.lat}">
+        <input type="hidden" id="e-lng" name="lng" value="${g.lng}">
+        <div class="field"><label for="e-spot">How will people find you? <span class="hint">(optional)</span></label><input type="text" id="e-spot" name="spot" maxlength="90" value="${esc(g.spot)}"><span class="hint">Members see this after they join.</span></div>
+      </fieldset>
+      <fieldset><legend>Who it's for</legend>
+        <div class="field"><span class="label" id="e-lang-l">Languages spoken</span><div class="toggles" role="group" aria-labelledby="e-lang-l">${LANGS.map(l => `<label class="toggle"><input type="checkbox" name="lang" value="${l}"${g.lang.includes(l) ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div></div>
+        <div class="row2"><div class="field"><span class="label" id="e-cost-l">Cost</span><div class="toggles" role="radiogroup" aria-labelledby="e-cost-l"><label class="toggle"><input type="radio" name="cost" value="free"${g.cost === 0 ? ' checked' : ''}><span>Free</span></label><label class="toggle"><input type="radio" name="cost" value="paid"${g.cost > 0 ? ' checked' : ''}><span>Small cost</span></label></div></div>
+        <div class="field" id="e-amount-wrap"${g.cost === 0 ? ' hidden' : ''}><label for="e-amount">Euros per meetup</label><input type="number" id="e-amount" name="amount" min="1" max="50" step="1" value="${g.cost > 0 ? g.cost : 5}"></div></div>
+        <div class="field"><label for="e-size">Group size, including you</label><select class="input" id="e-size" name="size">${[3, 4, 5, 6, 7, 8].map(n => `<option value="${n}"${n === g.size ? ' selected' : ''}>${n} people</option>`).join('')}</select><span class="hint">Can't go below current member count (${g.members.length}).</span></div>
+        <div class="field"><label class="check-row" for="e-friends-only"><input type="checkbox" id="e-friends-only" name="friendsOnly"${g.friendsOnly ? ' checked' : ''}>Friends-only (only visible to people you've connected with)</label></div>
+      </fieldset>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">${svg('check', 16)}Save changes</button><a class="btn btn-secondary" href="#group-${g.id}">Cancel</a></div>
+    </form>
+    <div class="preview-col"><span class="label">Preview</span><div id="e-preview"></div><p class="hint">This is how your group shows up in Discover.</p></div>
+  </div>`;
+}
+
 /* Router & Render */
 const NAV = [
   ['discover', 'compass', 'Discover', 'Discover'],
@@ -701,6 +804,11 @@ function route() {
   if (h.startsWith('group-')) {
     const g = byId(h.slice(6));
     if (g) return { name: 'group', g };
+  }
+  if (h.startsWith('edit-group-')) {
+    const g = byId(h.slice(11));
+    if (g && g.host === state.me?.id) return { name: 'edit-group', g };
+    return { name: 'discover' };
   }
   return { name: ['my-groups', 'calendar', 'profile', 'start-group'].includes(h) ? h : 'discover' };
 }
@@ -726,7 +834,7 @@ function render() {
   const key = r.name + (r.g ? r.g.id : '');
   const changed = key !== lastKey;
   if (changed) {
-    ui.leave = false; ui.plan = false;
+    ui.leave = false; ui.plan = false; ui.deleteConfirm = false; ui.kickConfirm = null;
     // start polling chat when inside a group, stop when leaving
     if (r.name === 'group' && isMember(r.g)) {
       stopPoll();
@@ -747,6 +855,7 @@ function render() {
   ).join('');
 
   main.innerHTML = r.name === 'group' ? groupView(r.g)
+    : r.name === 'edit-group' ? editGroupView(r.g)
     : r.name === 'my-groups' ? myGroupsView()
     : r.name === 'calendar' ? calendarView()
     : r.name === 'profile' ? profileView()
@@ -755,6 +864,7 @@ function render() {
 
   document.title = r.name === 'group' ? `${r.g.name} · Common` : 'Common';
   if (r.name === 'start-group' && changed) updatePreview();
+  if (r.name === 'edit-group' && changed) updateEditPreview();
 
   const chatList = document.getElementById('chat-list');
   if (chatList) chatList.scrollTop = chatList.scrollHeight;
@@ -798,6 +908,21 @@ function render() {
         ui.startLng = lng;
         document.getElementById('s-lat').value = lat;
         document.getElementById('s-lng').value = lng;
+      }
+    });
+  } else if (r.name === 'edit-group' && changed) {
+    ui.editLat = r.g.lat;
+    ui.editLng = r.g.lng;
+    initLocationPicker('e-loc-map', {
+      lat: r.g.lat,
+      lng: r.g.lng,
+      searchPrefix: 'e',
+      onLocation: (lat, lng) => {
+        ui.editLat = lat;
+        ui.editLng = lng;
+        document.getElementById('e-lat').value = lat;
+        document.getElementById('e-lng').value = lng;
+        updateEditPreview();
       }
     });
   }
@@ -1018,6 +1143,42 @@ document.addEventListener('click', async e => {
           break;
         }
 
+      case 'kick':
+        ui.kickConfirm = t.dataset.uid; render();
+        main.querySelector(`[data-key="kick-yes-${t.dataset.uid}"]`)?.focus();
+        break;
+      case 'kick-cancel':
+        ui.kickConfirm = null; render();
+        break;
+      case 'kick-confirm':
+        if (!g) break; {
+          const uid = t.dataset.uid;
+          const kicked = person(uid);
+          mergeState(await api(`/api/groups/${encodeURIComponent(g.id)}/kick`, { method: 'POST', body: JSON.stringify({ userId: uid }) }));
+          ui.kickConfirm = null;
+          render();
+          toast(`${kicked?.name || 'Member'} has been removed.`);
+          break;
+        }
+
+      case 'delete-group':
+        ui.deleteConfirm = true; render();
+        main.querySelector('[data-key="delete-yes"]')?.focus();
+        break;
+      case 'delete-cancel':
+        ui.deleteConfirm = false; render();
+        main.querySelector('[data-key="delete-group"]')?.focus();
+        break;
+      case 'delete-confirm':
+        if (!g) break; {
+          const name = g.name;
+          mergeState(await api(`/api/groups/${encodeURIComponent(g.id)}/delete`, { method: 'POST' }));
+          ui.deleteConfirm = false;
+          location.hash = 'discover';
+          toast(`${name} has been deleted.`);
+          break;
+        }
+
       case 'transfer':
         if (!g) break; {
           const nonHostMembers = g.members.filter(id => id !== state.me.id);
@@ -1080,6 +1241,10 @@ document.addEventListener('change', e => {
     if (t.name === 'cost') document.getElementById('amount-wrap').hidden = t.value !== 'paid';
     updatePreview();
   }
+  if (t.closest('#edit-form')) {
+    if (t.name === 'cost') document.getElementById('e-amount-wrap').hidden = t.value !== 'paid';
+    updateEditPreview();
+  }
 });
 
 document.addEventListener('input', e => {
@@ -1093,6 +1258,10 @@ document.addEventListener('input', e => {
   if (e.target.closest('#start-form')) {
     if (e.target.setCustomValidity) e.target.setCustomValidity('');
     updatePreview();
+  }
+  if (e.target.closest('#edit-form')) {
+    if (e.target.setCustomValidity) e.target.setCustomValidity('');
+    updateEditPreview();
   }
 });
 
@@ -1157,6 +1326,47 @@ document.addEventListener('submit', async e => {
       }));
       render();
       toast('Profile updated. Suggestions refreshed.');
+    } else if (f.id === 'edit-form') {
+      for (const id of ['e-name', 'e-place']) {
+        const el = document.getElementById(id);
+        if (!el.value.trim()) { el.setCustomValidity('Please fill this in.'); el.reportValidity(); return; }
+      }
+      const gid = f.dataset.id;
+      const g = byId(gid);
+      if (!g) return;
+      const fd = new FormData(f);
+      const paid = fd.get('cost') === 'paid';
+      const langsPicked = fd.getAll('lang');
+      const lat = ui.editLat || g.lat;
+      const lng = ui.editLng || g.lng;
+      let area = g.area;
+      let bestD = Infinity;
+      for (const [aName, [aLat, aLng]] of Object.entries(AREAS)) {
+        const d = (lat - aLat) ** 2 + (lng - aLng) ** 2;
+        if (d < bestD) { bestD = d; area = aName; }
+      }
+      mergeState(await api(`/api/groups/${encodeURIComponent(gid)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: fd.get('name'),
+          desc: fd.get('desc'),
+          place: fd.get('place'),
+          area,
+          spot: fd.get('spot'),
+          date: fd.get('date'),
+          time: fd.get('time'),
+          duration: Number(fd.get('duration')),
+          weekly: fd.get('weekly') === 'on',
+          lang: langsPicked.length ? langsPicked : g.lang,
+          cost: paid ? Math.max(1, Math.min(50, Number(fd.get('amount')) || 5)) : 0,
+          size: Number(fd.get('size')),
+          friendsOnly: fd.get('friendsOnly') === 'on',
+          lat,
+          lng
+        })
+      }));
+      location.hash = 'group-' + gid;
+      toast('Group updated.');
     }
   } catch (err) {
     toast(err.message);

@@ -237,9 +237,10 @@ export function initLocationPicker(containerId, opts = {}) {
     maps.set(containerId, { map, markers: marker ? [marker] : [] });
 
     // Wire up search controls
-    const searchInput = document.getElementById('s-loc-search');
-    const searchBtn = document.getElementById('s-loc-btn');
-    const resultsList = document.getElementById('s-loc-results');
+    const prefix = opts.searchPrefix || 's';
+    const searchInput = document.getElementById(prefix + '-loc-search');
+    const searchBtn = document.getElementById(prefix + '-loc-btn');
+    const resultsList = document.getElementById(prefix + '-loc-results');
     if (!searchInput || !searchBtn || !resultsList) return;
 
     async function doSearch() {
