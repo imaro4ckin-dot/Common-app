@@ -74,12 +74,14 @@ export const SEED_GROUPS = [
     desc: 'A relaxed 5 km along the river. No pace goals, just a reason to get outside and talk.',
     place: 'Neckarwiese', area: 'Neuenheim', spot: 'By the big plane tree next to Theodor-Heuss-Brücke',
     lang: ['English'], cost: 0, size: 6, host: 'lena', friendsOnly: false,
-    members: ['lena', 'kofi', 'sofia'],
-    rsvp: { lena: 'going', kofi: 'going', sofia: 'skip' },
+    members: ['lena', 'kofi', 'sofia', 'me'],
+    rsvp: { lena: 'going', kofi: 'going', sofia: 'skip', me: 'going' },
     lat: 49.4147, lng: 8.6978,
     chat: [
       { from: 'lena', text: 'Welcome Kofi! We keep it slow, so nobody gets left behind.' },
-      { from: 'kofi', text: 'Perfect, that is exactly my speed. See you Tuesday!' }
+      { from: 'kofi', text: 'Perfect, that is exactly my speed. See you Tuesday!' },
+      { sys: true, text: 'Alex joined the group.' },
+      { from: 'lena', text: 'Hey Alex! Great to have you. See you Tuesday evening at the river.' }
     ]
   },
   {
