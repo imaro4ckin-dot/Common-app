@@ -1,6 +1,6 @@
 # common_
 
-> Weekly small-group meetups that help newcomers build lasting friendships in Heidelberg.
+> Weekly small-group meetups that help newcomers build lasting friendships.
 
 ---
 
@@ -14,16 +14,16 @@ You join (or start) a recurring meetup around something you already enjoy — a 
 
 ## Features
 
-- **Discover groups** — filter by activity, language, distance, or friends
-- **Map view** — real OpenStreetMap tiles with group pins and a distance ring
-- **Location picker** — search any address via Nominatim and drop a pin on the exact spot when creating a group
-- **Recurring calendar invites** — `.ics` download works with Google Calendar, Apple Calendar, Outlook
-- **Friends-only groups** — visible only to people you've connected with
-- **I'm here** — tap when you arrive so members can spot each other
-- **Group chat** — simple in-group messaging with shared plans
-- **Match scoring** — groups ranked by interests, availability, language, distance, and familiar faces
-- **Verified profiles** — badge for people who've verified their identity
-- **Seed data** — 9 real groups across 7 Heidelberg neighbourhoods, ready to explore on first run
+- **Discover groups** — filter by activity, language, distance, new-here, or friends; ranked by interests, availability, distance, and familiar faces
+- **Map view** — OpenStreetMap tiles via Leaflet with group pins and a distance ring
+- **Global multi-city support & location picker** — pin your home neighbourhood anywhere via Nominatim and search/drop a pin when creating a group
+- **Per-session attendance & co-attendance** — weekly Going/Skip resets cleanly per session, tracks real meetups attended, and shows `"Met N×"` history between members
+- **Post-meetup connection loop** — 6-hour post-meetup rating window with `"Who did you click with?"` 1-tap friend & coffee catch-up prompts
+- **Arrival & icebreaker helpers** — `"I'm here"` check-in with `"what I'm wearing"` arrival notes, weekly Welcome buddy volunteer role, newcomer tips, and pinned weekly icebreakers in chat
+- **Live calendar subscriptions** — per-user `webcal://` / `.ics` feeds and per-group `.ics` downloads with `RRULE:FREQ=WEEKLY` and `EXDATE` exclusions for skipped or paused weeks
+- **Waitlist & spin-off groups** — automatic waitlist promotion with in-app notifications, plus 1-click spin-off creation when 2+ people are waiting
+- **Real-time updates** — Server-Sent Events (`/api/events`) keep group chat, RSVPs, and arrival check-ins synced live
+- **Multi-user persona switcher** — switch personas or create new newcomer accounts with guided onboarding
 
 ---
 
@@ -31,15 +31,16 @@ You join (or start) a recurring meetup around something you already enjoy — a 
 
 | Layer | Choice |
 |---|---|
-| Server | Node.js `node:http` (no framework) |
+| Server | Node.js `node:http` + Server-Sent Events (no framework) |
 | Database | SQLite via `node:sqlite` (Node ≥ 22.5) |
 | Frontend | Vanilla JS ES modules, no build step |
 | Maps | [Leaflet](https://leafletjs.com/) + [OpenStreetMap](https://www.openstreetmap.org/) |
 | Geocoding | [Nominatim](https://nominatim.org/) (free, no API key) |
-| Calendar | Hand-rolled ICS generation |
+| Calendar | Hand-rolled RFC 5545 ICS + `EXDATE` generation |
+| Tests | Built-in `node:test` (`npm test`) |
 | Fonts | Bricolage Grotesque + Inter (Google Fonts) |
 
-No React. No bundler. No dependencies. The entire `node_modules` folder doesn't exist.
+No React. No bundler. No dependencies. No `node_modules` folder required.
 
 ---
 
@@ -48,14 +49,14 @@ No React. No bundler. No dependencies. The entire `node_modules` folder doesn't 
 **Requires Node.js ≥ 22.5.0** (for the built-in `node:sqlite` module).
 
 ```bash
-git clone https://github.com/YOUR_USER/common-app.git
 cd common-app
+npm test
 npm start
 ```
 
-Open **http://localhost:3456**
+Open **http://127.0.0.1:3456**
 
-The database is created automatically on first run and seeded with 9 groups, 15 people, and a handful of friendships. Delete `data/common.db` and restart to reset everything, or use the **Reset demo data** button in the footer.
+The database is created automatically on first run and seeded with 9 groups, 17 people, past session history, and sample friendships. Delete `data/common.db` and restart to reset everything, or use the **Reset demo data** button in the footer.
 
 ---
 
@@ -64,16 +65,19 @@ The database is created automatically on first run and seeded with 9 groups, 15 
 ```
 common-app/
 ├── src/
-│   ├── server.js     # HTTP server, REST API routes
-│   ├── db.js         # SQLite schema, seed data, queries
+│   ├── server.js     # HTTP server, SSE stream, REST API routes
+│   ├── db.js         # SQLite schema, migrations, seed data, queries
 │   ├── data.js       # Seed people, groups, areas, categories
-│   └── ics.js        # ICS calendar file generation
+│   └── ics.js        # Per-group & per-user ICS calendar generation
 ├── public/
 │   ├── index.html    # Shell — one page, no server-side rendering
-│   ├── app.js        # SPA router, views, event handling
-│   ├── map.js        # Leaflet map init, location picker, mini-map
+│   ├── app.js        # SPA router, views, SSE client, event handling
+│   ├── schedule.js   # Shared session-date & rating-window logic
+│   ├── map.js        # Leaflet map init, global location picker, mini-map
 │   ├── icons.js      # SVG icon library + category definitions
 │   └── styles.css    # Design tokens, layout, components
+├── test/
+│   └── app.test.js   # Unit, migration, API, ICS, and SSE tests
 ├── data/             # SQLite database (gitignored, auto-created)
 └── package.json
 ```
@@ -82,35 +86,28 @@ common-app/
 
 ## API
 
-All endpoints accept and return JSON. Pass `X-User-Id` header to act as a specific user (defaults to `me`).
+All endpoints accept and return JSON. Pass `X-User-Id` header (or `?user=`) to act as a specific user (defaults to `me`).
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/api/events` | Server-Sent Events stream for live updates |
 | `GET` | `/api/state` | Full app state for the current user |
-| `PATCH` | `/api/me` | Update profile |
-| `POST` | `/api/groups` | Create a group |
+| `POST` | `/api/users` | Create a new user profile |
+| `PATCH` | `/api/me` | Update profile, home location, interests, availability |
+| `POST` | `/api/groups` | Create a group (including optional `spinoffFrom`) |
+| `PATCH` | `/api/groups/:id` | Update icebreaker, tips, spot, or co-host |
 | `POST` | `/api/groups/:id/join` | Join a group |
-| `POST` | `/api/groups/:id/leave` | Leave a group |
-| `POST` | `/api/groups/:id/rsvp` | RSVP going / skip |
-| `POST` | `/api/groups/:id/arrive` | Toggle "I'm here" arrival |
-| `POST` | `/api/groups/:id/messages` | Post a message or plan |
-| `GET` | `/api/groups/:id/calendar.ics` | Download recurring calendar invite |
+| `POST` | `/api/groups/:id/leave` | Leave a group (auto-promotes & notifies waitlist) |
+| `POST` | `/api/groups/:id/rsvp` | Per-session RSVP going / skip |
+| `POST` | `/api/groups/:id/arrive` | Toggle `"I'm here"` arrival & optional arrival note |
+| `POST` | `/api/groups/:id/welcome-buddy` | Toggle weekly Welcome buddy role |
+| `POST` | `/api/groups/:id/messages` | Post a chat message or extra plan |
+| `POST` | `/api/groups/:id/rate` | Rate meetup within 6h after session end |
+| `GET` | `/api/groups/:id/calendar.ics` | Download group recurring `.ics` invite |
+| `GET` | `/api/users/:id/calendar.ics` | Live combined `.ics` feed for all joined groups |
 | `POST` | `/api/friends/:id/toggle` | Add / remove a familiar face |
+| `POST` | `/api/notifications/read` | Mark notifications read |
 | `POST` | `/api/reset` | Re-seed the database |
-
----
-
-## Neighbourhoods
-
-Groups are pinned to real coordinates across seven Heidelberg areas:
-
-`Altstadt` · `Bergheim` · `Neuenheim` · `Weststadt` · `Handschuhsheim` · `Neuenheimer Feld` · `Bahnstadt`
-
----
-
-## Activity categories
-
-`Running` · `Board games` · `Coffee & chat` · `Creative` · `Coworking` · `Cooking` · `Hiking` · `Photography` · `Language exchange` · `Climbing` · `Music` · `Volunteering`
 
 ---
 

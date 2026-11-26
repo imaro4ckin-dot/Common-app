@@ -2,9 +2,15 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AREAS, CATS, LANGS } from './data.js';
-import { createDb, getFullState, getUser, seedDatabase } from './db.js';
-import { generateIcs } from './ics.js';
+import { AREAS, CATS, LANGS, LANG_LEVELS, ymd } from './data.js';
+import { createDb, createNotification, getFullState, getUser, seedDatabase } from './db.js';
+import { generateIcs, generateUserCalendarIcs } from './ics.js';
+import {
+  getMondayTs,
+  isInRatingWindow,
+  lastSessionDate,
+  nextSessionDate
+} from '../public/schedule.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, '../public');
@@ -36,44 +42,99 @@ async function readBody(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
-function parseUserId(req) {
+function parseUserId(req, url) {
+  const q = url?.searchParams?.get('user');
+  if (typeof q === 'string' && /^[a-z0-9_-]{1,32}$/i.test(q)) return q;
   const h = req.headers['x-user-id'];
   if (typeof h === 'string' && /^[a-z0-9_-]{1,32}$/i.test(h)) return h;
   return 'me';
 }
 
-// Project next session time (same logic as client-side nextSession)
-function nextSessionFromGroup(g) {
-  const d = new Date(`${g.date}T${g.time}:00`);
-  const now = Date.now();
-  if (g.weekly) {
-    while (d.getTime() + g.duration * 60000 < now) d.setDate(d.getDate() + 7);
+function parseGroupRow(g) {
+  return {
+    ...g,
+    weekly: Boolean(g.weekly),
+    friendsOnly: Boolean(g.friends_only),
+    lang: JSON.parse(g.lang),
+    langLevel: g.lang_level || 'all',
+    coHost: g.co_host || null,
+    pausedUntil: g.paused_until || null
+  };
+}
+
+export function createApp(db, opts = {}) {
+  const getNow = typeof opts.now === 'function' ? opts.now : () => Date.now();
+  const sseClients = new Set();
+
+  function broadcast(payload) {
+    const msg = `data: ${JSON.stringify(payload)}\n\n`;
+    for (const client of sseClients) {
+      try {
+        client.write(msg);
+      } catch {
+        sseClients.delete(client);
+      }
+    }
   }
-  return d;
-}
 
-function getMondayTs(ts) {
-  const d = new Date(ts);
-  const day = d.getDay();
-  d.setDate(d.getDate() - ((day + 6) % 7));
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-export function createApp(db) {
-  return async function handler(req, res) {
+  async function handler(req, res) {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const path = url.pathname;
     const method = req.method || 'GET';
-    const currentUserId = parseUserId(req);
+    const currentUserId = parseUserId(req, url);
+    const nowTs = getNow();
 
     try {
       if (path === '/api/health' && method === 'GET') {
         return json(res, 200, { ok: true });
       }
 
+      if (path === '/api/events' && method === 'GET') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive'
+        });
+        res.write(`data: ${JSON.stringify({ type: 'connected', userId: currentUserId })}\n\n`);
+        sseClients.add(res);
+        const keepAlive = setInterval(() => {
+          try { res.write(': keepalive\n\n'); } catch { clearInterval(keepAlive); }
+        }, 25000);
+        keepAlive.unref();
+        req.on('close', () => {
+          clearInterval(keepAlive);
+          sseClients.delete(res);
+        });
+        return;
+      }
+
       if (path === '/api/state' && method === 'GET') {
-        return json(res, 200, getFullState(db, currentUserId));
+        return json(res, 200, getFullState(db, currentUserId, nowTs));
+      }
+
+      if (path === '/api/users' && method === 'POST') {
+        const body = await readBody(req);
+        const name = String(body.name || '').trim().slice(0, 40);
+        if (!name) return json(res, 400, { error: 'Name is required' });
+
+        const id = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+        const since = String(body.since || '').trim().slice(0, 60) || 'Just arrived';
+        const city = String(body.city || '').trim().slice(0, 60) || 'Heidelberg';
+        const area = String(body.area || '').trim().slice(0, 60) || 'Bergheim';
+        const [dLat, dLng] = AREAS[area] || AREAS.Bergheim;
+        const homeLat = Number.isFinite(Number(body.homeLat)) ? Number(body.homeLat) : dLat;
+        const homeLng = Number.isFinite(Number(body.homeLng)) ? Number(body.homeLng) : dLng;
+        const languages = Array.isArray(body.languages) && body.languages.length
+          ? body.languages.filter(l => LANGS.includes(l))
+          : ['English'];
+
+        db.prepare(`
+          INSERT INTO users (id, name, since, new_here, verified, city, area, home_lat, home_lng, languages, interests, availability, intro)
+          VALUES (?, ?, ?, 1, 0, ?, ?, ?, ?, ?, '[]', '[]', ?)
+        `).run(id, name, since, city, area, homeLat, homeLng, JSON.stringify(languages), String(body.intro || '').trim().slice(0, 200));
+
+        broadcast({ type: 'state_changed' });
+        return json(res, 201, { userId: id, state: getFullState(db, id, nowTs) });
       }
 
       if (path === '/api/me' && method === 'PATCH') {
@@ -84,7 +145,16 @@ export function createApp(db) {
         const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 40) : existing.name;
         const since = typeof body.since === 'string' && body.since.trim() ? body.since.trim().slice(0, 60) : existing.since;
         const intro = typeof body.intro === 'string' ? body.intro.trim().slice(0, 200) : existing.intro;
-        const area = AREAS[body.area] ? body.area : existing.area;
+        const city = typeof body.city === 'string' && body.city.trim() ? body.city.trim().slice(0, 60) : existing.city;
+        const area = typeof body.area === 'string' && body.area.trim() ? body.area.trim().slice(0, 60) : existing.area;
+        const preset = AREAS[area];
+        const homeLat = Number.isFinite(Number(body.homeLat)) && Math.abs(Number(body.homeLat)) <= 90
+          ? Number(body.homeLat)
+          : (body.area && body.area !== existing.area && preset ? preset[0] : existing.homeLat);
+        const homeLng = Number.isFinite(Number(body.homeLng)) && Math.abs(Number(body.homeLng)) <= 180
+          ? Number(body.homeLng)
+          : (body.area && body.area !== existing.area && preset ? preset[1] : existing.homeLng);
+
         const languages = Array.isArray(body.languages) && body.languages.length
           ? body.languages.filter(l => LANGS.includes(l))
           : existing.languages;
@@ -99,11 +169,38 @@ export function createApp(db) {
 
         db.prepare(`
           UPDATE users
-          SET name = ?, since = ?, intro = ?, area = ?, languages = ?, interests = ?, availability = ?, verified = ?, new_here = ?
+          SET name = ?, since = ?, intro = ?, city = ?, area = ?, home_lat = ?, home_lng = ?, languages = ?, interests = ?, availability = ?, verified = ?, new_here = ?
           WHERE id = ?
-        `).run(name, since, intro, area, JSON.stringify(languages), JSON.stringify(interests), JSON.stringify(availability), verified, newHere, existing.id);
+        `).run(
+          name, since, intro, city, area, homeLat, homeLng,
+          JSON.stringify(languages), JSON.stringify(interests), JSON.stringify(availability),
+          verified, newHere, existing.id
+        );
 
-        return json(res, 200, getFullState(db, existing.id));
+        broadcast({ type: 'state_changed' });
+        return json(res, 200, getFullState(db, existing.id, nowTs));
+      }
+
+      if (path === '/api/notifications/read' && method === 'POST') {
+        db.prepare('UPDATE notifications SET read = 1 WHERE user_id = ?').run(currentUserId);
+        return json(res, 200, getFullState(db, currentUserId, nowTs));
+      }
+
+      // Personal calendar subscription feed (.ics)
+      const userCalMatch = path.match(/^\/api\/users\/([a-z0-9_-]+)\/calendar\.ics$/i);
+      if ((userCalMatch || path === '/api/calendar.ics') && method === 'GET') {
+        const uid = userCalMatch ? userCalMatch[1] : currentUserId;
+        const user = getUser(db, uid);
+        if (!user) return json(res, 404, { error: 'User not found' });
+
+        const full = getFullState(db, uid, nowTs);
+        const joined = full.groups.filter(g => g.members.includes(uid));
+        const ics = generateUserCalendarIcs(user, joined, { nowTs });
+        res.writeHead(200, {
+          'Content-Type': 'text/calendar; charset=utf-8',
+          'Content-Disposition': `attachment; filename="common-${uid}-schedule.ics"`
+        });
+        return res.end(ics);
       }
 
       if (path === '/api/groups' && method === 'POST') {
@@ -118,108 +215,127 @@ export function createApp(db) {
           return json(res, 400, { error: 'Please provide valid group name, category, date, time, and place.' });
         }
 
-        const area = AREAS[body.area] ? body.area : 'Altstadt';
-        const [aLat, aLng] = AREAS[area];
+        const me = getUser(db, currentUserId);
+        const area = String(body.area || '').trim().slice(0, 60) || me?.area || 'Altstadt';
+        const city = String(body.city || '').trim().slice(0, 60) || me?.city || 'Heidelberg';
+        const [aLat, aLng] = AREAS[area] || [me?.homeLat || 49.4093, me?.homeLng || 8.7100];
         const id = 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
         const duration = [30, 45, 60, 90, 120].includes(Number(body.duration)) ? Number(body.duration) : 60;
         const weekly = body.weekly === false ? 0 : 1;
         const desc = String(body.desc || '').trim().slice(0, 200) || 'A small group, a shared interest and a reason to meet again.';
         const spot = String(body.spot || '').trim().slice(0, 90) || "I'll wave when you arrive";
+        const tips = String(body.tips || '').trim().slice(0, 200);
+        const icebreaker = String(body.icebreaker || '').trim().slice(0, 140);
         const lang = Array.isArray(body.lang) && body.lang.length ? body.lang.filter(l => LANGS.includes(l)) : ['English'];
+        const langLevel = LANG_LEVELS[body.langLevel] ? body.langLevel : 'all';
         const cost = Number.isFinite(Number(body.cost)) ? Math.max(0, Math.min(50, Math.round(Number(body.cost)))) : 0;
         const size = Math.max(3, Math.min(12, Number(body.size) || 6));
         const friendsOnly = body.friendsOnly ? 1 : 0;
         const jitter = 0.0015;
         const clientLat = Number(body.lat);
         const clientLng = Number(body.lng);
-        const lat = Number.isFinite(clientLat) && clientLat > 49.3 && clientLat < 49.5
+        const lat = Number.isFinite(clientLat) && clientLat >= -90 && clientLat <= 90
           ? clientLat : aLat + (Math.random() - 0.5) * jitter;
-        const lng = Number.isFinite(clientLng) && clientLng > 8.5 && clientLng < 8.9
+        const lng = Number.isFinite(clientLng) && clientLng >= -180 && clientLng <= 180
           ? clientLng : aLng + (Math.random() - 0.5) * jitter;
-        const now = Date.now();
 
         db.prepare(`
-          INSERT INTO groups (id, name, cat, date, time, duration, weekly, desc, place, area, spot, lang, cost, size, host, friends_only, lat, lng, paused_until, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(id, name, cat, date, time, duration, weekly, desc, place, area, spot, JSON.stringify(lang), cost, size, currentUserId, friendsOnly, lat, lng, null, now);
+          INSERT INTO groups (id, name, cat, date, time, duration, weekly, desc, place, area, city, spot, tips, icebreaker, lang, lang_level, cost, size, host, co_host, friends_only, lat, lng, paused_until, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, ?)
+        `).run(id, name, cat, date, time, duration, weekly, desc, place, area, city, spot, tips, icebreaker, JSON.stringify(lang), langLevel, cost, size, currentUserId, friendsOnly, lat, lng, nowTs);
 
-        db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, ?, ?)').run(id, currentUserId, 'going', now);
+        db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, ?, ?)').run(id, currentUserId, 'going', nowTs);
+        db.prepare(`
+          INSERT INTO session_attendance (group_id, user_id, session_date, rsvp, arrived_at, arrival_note, welcome_buddy)
+          VALUES (?, ?, ?, 'going', NULL, '', 1)
+        `).run(id, currentUserId, date);
         db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
-          id, null, 'Group started. Say hello when the first person joins.', now
+          id, null, 'Group started. Say hello when the first person joins.', nowTs
         );
 
-        return json(res, 201, { id, state: getFullState(db, currentUserId) });
+        // If spun off from a full group's waitlist, invite the other waitlisted people
+        if (typeof body.spinoffFrom === 'string' && body.spinoffFrom.trim()) {
+          const sourceId = body.spinoffFrom.trim();
+          const sourceGroup = db.prepare('SELECT name FROM groups WHERE id = ?').get(sourceId);
+          const peers = db.prepare('SELECT user_id FROM waitlist WHERE group_id = ? AND user_id != ?').all(sourceId, currentUserId);
+          for (const peer of peers) {
+            createNotification(db, {
+              userId: peer.user_id,
+              type: 'spinoff_invite',
+              groupId: id,
+              title: `New spin-off: ${name}`,
+              body: `${me?.name || 'Someone'} from the ${sourceGroup?.name || 'group'} waitlist started a second table on ${date} at ${time}.`,
+              link: `#group-${id}`
+            });
+          }
+        }
+
+        broadcast({ type: 'state_changed', groupId: id });
+        return json(res, 201, { id, state: getFullState(db, currentUserId, nowTs) });
       }
 
-      // Wishlist toggle
       if (path === '/api/wishlist' && method === 'POST') {
         const body = await readBody(req);
         const cat = String(body.cat || '').trim();
-        const area = String(body.area || '').trim();
+        const area = String(body.area || '').trim() || 'any';
         if (!CATS[cat]) return json(res, 400, { error: 'Invalid category' });
-        if (area !== 'any' && !AREAS[area]) return json(res, 400, { error: 'Invalid area' });
 
         const existing = db.prepare('SELECT 1 FROM wishlist WHERE user_id = ? AND cat = ? AND area = ?').get(currentUserId, cat, area);
         if (existing) {
           db.prepare('DELETE FROM wishlist WHERE user_id = ? AND cat = ? AND area = ?').run(currentUserId, cat, area);
         } else {
-          db.prepare('INSERT INTO wishlist (user_id, cat, area, created_at) VALUES (?, ?, ?, ?)').run(currentUserId, cat, area, Date.now());
+          db.prepare('INSERT INTO wishlist (user_id, cat, area, created_at) VALUES (?, ?, ?, ?)').run(currentUserId, cat, area, nowTs);
         }
-        return json(res, 200, getFullState(db, currentUserId));
+        broadcast({ type: 'state_changed' });
+        return json(res, 200, getFullState(db, currentUserId, nowTs));
       }
 
-      // PATCH /api/groups/:id — host-only group edit
-      const groupEditMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)$/i);
-      if (groupEditMatch && method === 'PATCH') {
-        const [, groupId] = groupEditMatch;
+      // Host/Co-host group details patch (icebreaker, tips, coHost, spot)
+      const groupPatchMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)$/i);
+      if (groupPatchMatch && method === 'PATCH') {
+        const groupId = groupPatchMatch[1];
         const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
         if (!group) return json(res, 404, { error: 'Group not found' });
-        if (group.host !== currentUserId) return json(res, 403, { error: 'Only the host can edit the group' });
+        if (group.host !== currentUserId && group.co_host !== currentUserId) {
+          return json(res, 403, { error: 'Only host or co-host can update group details' });
+        }
 
         const body = await readBody(req);
-        const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : group.name;
-        const desc = typeof body.desc === 'string' ? body.desc.trim().slice(0, 200) : group.desc;
-        const place = typeof body.place === 'string' && body.place.trim() ? body.place.trim().slice(0, 60) : group.place;
-        const spot = typeof body.spot === 'string' ? body.spot.trim().slice(0, 90) : group.spot;
-        const area = AREAS[body.area] ? body.area : group.area;
-        const date = typeof body.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : group.date;
-        const time = typeof body.time === 'string' && /^\d{2}:\d{2}$/.test(body.time) ? body.time : group.time;
-        const duration = [30, 45, 60, 90, 120].includes(Number(body.duration)) ? Number(body.duration) : group.duration;
-        const weekly = typeof body.weekly === 'boolean' ? (body.weekly ? 1 : 0) : group.weekly;
-        const lang = Array.isArray(body.lang) && body.lang.length ? body.lang.filter(l => LANGS.includes(l)) : JSON.parse(group.lang);
-        const cost = Number.isFinite(Number(body.cost)) ? Math.max(0, Math.min(50, Math.round(Number(body.cost)))) : group.cost;
-        const friendsOnly = typeof body.friendsOnly === 'boolean' ? (body.friendsOnly ? 1 : 0) : group.friends_only;
-        const memberCount = db.prepare('SELECT COUNT(*) AS c FROM memberships WHERE group_id = ?').get(groupId).c;
-        const rawSize = Math.max(3, Math.min(12, Number(body.size) || group.size));
-        const size = Math.max(rawSize, memberCount);
-        const clientLat = Number(body.lat);
-        const clientLng = Number(body.lng);
-        const lat = Number.isFinite(clientLat) && clientLat > 49.3 && clientLat < 49.5 ? clientLat : group.lat;
-        const lng = Number.isFinite(clientLng) && clientLng > 8.5 && clientLng < 8.9 ? clientLng : group.lng;
+        const icebreaker = typeof body.icebreaker === 'string' ? body.icebreaker.trim().slice(0, 140) : group.icebreaker;
+        const tips = typeof body.tips === 'string' ? body.tips.trim().slice(0, 200) : group.tips;
+        const spot = typeof body.spot === 'string' && body.spot.trim() ? body.spot.trim().slice(0, 90) : group.spot;
+        let coHost = group.co_host;
+        if (body.coHost === null || body.coHost === '') {
+          coHost = null;
+        } else if (typeof body.coHost === 'string' && body.coHost !== group.host) {
+          const isMem = db.prepare('SELECT 1 FROM memberships WHERE group_id = ? AND user_id = ?').get(groupId, body.coHost);
+          if (!isMem) return json(res, 400, { error: 'Co-host must be a current member' });
+          coHost = body.coHost;
+        }
 
-        db.prepare(`
-          UPDATE groups
-          SET name = ?, desc = ?, place = ?, area = ?, spot = ?, date = ?, time = ?, duration = ?,
-              weekly = ?, lang = ?, cost = ?, size = ?, friends_only = ?, lat = ?, lng = ?
-          WHERE id = ?
-        `).run(name, desc, place, area, spot, date, time, duration, weekly, JSON.stringify(lang), cost, size, friendsOnly, lat, lng, groupId);
-
-        return json(res, 200, getFullState(db, currentUserId));
+        db.prepare('UPDATE groups SET icebreaker = ?, tips = ?, spot = ?, co_host = ? WHERE id = ?')
+          .run(icebreaker, tips, spot, coHost, groupId);
+        broadcast({ type: 'state_changed', groupId });
+        return json(res, 200, getFullState(db, currentUserId, nowTs));
       }
 
-      const groupMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)\/(join|leave|rsvp|messages|calendar\.ics|arrive|waitlist|rate|pause|transfer|kick|delete)$/i);
+      const groupMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)\/(join|leave|rsvp|messages|calendar\.ics|arrive|welcome-buddy|waitlist|rate|pause|transfer)$/i);
       if (groupMatch) {
         const [, groupId, action] = groupMatch;
-        const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
-        if (!group) return json(res, 404, { error: 'Group not found' });
+        const groupRow = db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
+        if (!groupRow) return json(res, 404, { error: 'Group not found' });
+        const group = parseGroupRow(groupRow);
+        const sessDate = ymd(nextSessionDate(group, nowTs, false));
 
         if (action === 'calendar.ics' && method === 'GET') {
-          const parsed = {
-            ...group,
-            weekly: Boolean(group.weekly),
-            lang: JSON.parse(group.lang)
-          };
-          const ics = generateIcs(parsed);
+          const skippedRows = db.prepare(`
+            SELECT session_date FROM session_attendance
+            WHERE group_id = ? AND user_id = ? AND rsvp = 'skip'
+          `).all(groupId, currentUserId);
+          const ics = generateIcs(group, {
+            nowTs,
+            skippedDates: skippedRows.map(r => r.session_date)
+          });
           res.writeHead(200, {
             'Content-Type': 'text/calendar; charset=utf-8',
             'Content-Disposition': `attachment; filename="${group.id}-meetup.ics"`
@@ -229,37 +345,48 @@ export function createApp(db) {
 
         if (action === 'join' && method === 'POST') {
           const members = db.prepare('SELECT user_id FROM memberships WHERE group_id = ?').all(groupId).map(r => r.user_id);
-          if (members.includes(currentUserId)) return json(res, 200, getFullState(db, currentUserId));
+          if (members.includes(currentUserId)) return json(res, 200, getFullState(db, currentUserId, nowTs));
           if (members.length >= group.size) return json(res, 409, { error: 'This group is full' });
 
-          db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, NULL, ?)').run(groupId, currentUserId, Date.now());
+          db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, NULL, ?)').run(groupId, currentUserId, nowTs);
           db.prepare('DELETE FROM waitlist WHERE group_id = ? AND user_id = ?').run(groupId, currentUserId);
-          const joiner = db.prepare('SELECT name FROM users WHERE id = ?').get(currentUserId);
-          db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
-            groupId, null, `${joiner?.name || 'Someone'} joined the group.`, Date.now()
-          );
-          return json(res, 200, { ...getFullState(db, currentUserId), showIntro: true });
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 200, { ...getFullState(db, currentUserId, nowTs), showIntro: true });
         }
 
         if (action === 'leave' && method === 'POST') {
           if (group.host === currentUserId) return json(res, 400, { error: 'Hosts cannot leave their own group' });
           db.prepare('DELETE FROM memberships WHERE group_id = ? AND user_id = ?').run(groupId, currentUserId);
+          db.prepare('DELETE FROM session_attendance WHERE group_id = ? AND user_id = ? AND session_date >= ?').run(groupId, currentUserId, sessDate);
+          if (group.coHost === currentUserId) {
+            db.prepare('UPDATE groups SET co_host = NULL WHERE id = ?').run(groupId);
+          }
           db.prepare(`
             DELETE FROM plan_participants
             WHERE user_id = ? AND message_id IN (SELECT id FROM messages WHERE group_id = ?)
           `).run(currentUserId, groupId);
 
-          // Auto-promote first waitlister
+          // Auto-promote first waitlister & notify them
           const next = db.prepare('SELECT user_id FROM waitlist WHERE group_id = ? ORDER BY joined_at ASC LIMIT 1').get(groupId);
           if (next) {
-            db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, NULL, ?)').run(groupId, next.user_id, Date.now());
+            db.prepare('INSERT INTO memberships (group_id, user_id, rsvp, joined_at) VALUES (?, ?, NULL, ?)').run(groupId, next.user_id, nowTs);
             db.prepare('DELETE FROM waitlist WHERE group_id = ? AND user_id = ?').run(groupId, next.user_id);
             const promotedUser = db.prepare('SELECT name FROM users WHERE id = ?').get(next.user_id);
             db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
-              groupId, null, `${promotedUser?.name || 'Someone'} joined from the waitlist.`, Date.now()
+              groupId, null, `${promotedUser?.name || 'Someone'} joined from the waitlist.`, nowTs
             );
+            createNotification(db, {
+              userId: next.user_id,
+              type: 'waitlist_promoted',
+              groupId,
+              title: `Spot opened in ${group.name}!`,
+              body: `You moved off the waitlist and are now in the group. Tap Going or Skip for ${sessDate}.`,
+              link: `#group-${groupId}`
+            });
           }
-          return json(res, 200, getFullState(db, currentUserId));
+
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 200, getFullState(db, currentUserId, nowTs));
         }
 
         if (action === 'rsvp' && method === 'POST') {
@@ -271,28 +398,79 @@ export function createApp(db) {
           if (!membership) return json(res, 403, { error: 'Join the group before RSVPing' });
 
           db.prepare('UPDATE memberships SET rsvp = ? WHERE group_id = ? AND user_id = ?').run(body.status, groupId, currentUserId);
+          db.prepare(`
+            INSERT INTO session_attendance (group_id, user_id, session_date, rsvp, arrived_at, arrival_note, welcome_buddy)
+            VALUES (?, ?, ?, ?, NULL, '', 0)
+            ON CONFLICT(group_id, user_id, session_date) DO UPDATE SET rsvp = excluded.rsvp
+          `).run(groupId, currentUserId, sessDate, body.status);
 
-          // Milestone detection: approximate total meetup-weeks across all groups
           let milestone = null;
           if (body.status === 'going') {
-            const allMemberships = db.prepare('SELECT joined_at FROM memberships WHERE user_id = ?').all(currentUserId);
-            const nowTs = Date.now();
-            const totalWeeks = allMemberships.reduce((sum, m) => sum + Math.max(0, Math.floor((nowTs - m.joined_at) / (7 * 86400000))), 0);
-            if ([4, 10, 20, 50].includes(totalWeeks)) milestone = totalWeeks;
+            const distinctAtt = db.prepare(`
+              SELECT COUNT(DISTINCT group_id || ':' || session_date) AS c
+              FROM session_attendance
+              WHERE user_id = ? AND (rsvp = 'going' OR arrived_at IS NOT NULL)
+            `).get(currentUserId).c;
+            if ([4, 10, 20, 50].includes(distinctAtt)) milestone = distinctAtt;
           }
 
-          return json(res, 200, { ...getFullState(db, currentUserId), milestone });
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 200, { ...getFullState(db, currentUserId, nowTs), milestone });
         }
 
         if (action === 'arrive' && method === 'POST') {
-          const membership = db.prepare('SELECT arrived_at FROM memberships WHERE group_id = ? AND user_id = ?').get(groupId, currentUserId);
+          const membership = db.prepare('SELECT 1 FROM memberships WHERE group_id = ? AND user_id = ?').get(groupId, currentUserId);
           if (!membership) return json(res, 403, { error: 'Join the group first' });
 
-          const isArrived = Boolean(membership.arrived_at);
-          db.prepare('UPDATE memberships SET arrived_at = ? WHERE group_id = ? AND user_id = ?').run(
-            isArrived ? null : Date.now(), groupId, currentUserId
-          );
-          return json(res, 200, getFullState(db, currentUserId));
+          const body = await readBody(req);
+          const noteProvided = typeof body.note === 'string';
+          const cleanNote = noteProvided ? body.note.trim().slice(0, 80) : null;
+          const existing = db.prepare(`
+            SELECT arrived_at, arrival_note FROM session_attendance
+            WHERE group_id = ? AND user_id = ? AND session_date = ?
+          `).get(groupId, currentUserId, sessDate);
+
+          const isArrived = Boolean(existing?.arrived_at);
+          if (body.noteOnly && isArrived) {
+            db.prepare(`
+              UPDATE session_attendance SET arrival_note = ?
+              WHERE group_id = ? AND user_id = ? AND session_date = ?
+            `).run(cleanNote || '', groupId, currentUserId, sessDate);
+          } else {
+            const nextArrivedAt = isArrived ? null : nowTs;
+            const nextNote = nextArrivedAt ? (cleanNote ?? existing?.arrival_note ?? '') : '';
+            db.prepare(`
+              INSERT INTO session_attendance (group_id, user_id, session_date, rsvp, arrived_at, arrival_note, welcome_buddy)
+              VALUES (?, ?, ?, 'going', ?, ?, 0)
+              ON CONFLICT(group_id, user_id, session_date) DO UPDATE SET
+                arrived_at = excluded.arrived_at,
+                arrival_note = excluded.arrival_note,
+                rsvp = COALESCE(session_attendance.rsvp, 'going')
+            `).run(groupId, currentUserId, sessDate, nextArrivedAt, nextNote);
+          }
+
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 200, getFullState(db, currentUserId, nowTs));
+        }
+
+        if (action === 'welcome-buddy' && method === 'POST') {
+          const membership = db.prepare('SELECT 1 FROM memberships WHERE group_id = ? AND user_id = ?').get(groupId, currentUserId);
+          if (!membership) return json(res, 403, { error: 'Join the group first' });
+
+          const existing = db.prepare(`
+            SELECT welcome_buddy FROM session_attendance
+            WHERE group_id = ? AND user_id = ? AND session_date = ?
+          `).get(groupId, currentUserId, sessDate);
+
+          const nextBuddy = existing?.welcome_buddy ? 0 : 1;
+          db.prepare(`
+            INSERT INTO session_attendance (group_id, user_id, session_date, rsvp, arrived_at, arrival_note, welcome_buddy)
+            VALUES (?, ?, ?, 'going', NULL, '', ?)
+            ON CONFLICT(group_id, user_id, session_date) DO UPDATE SET welcome_buddy = excluded.welcome_buddy
+          `).run(groupId, currentUserId, sessDate, nextBuddy);
+
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 200, getFullState(db, currentUserId, nowTs));
         }
 
         if (action === 'messages' && method === 'POST') {
@@ -300,25 +478,26 @@ export function createApp(db) {
           if (!membership) return json(res, 403, { error: 'Join the group to post in chat' });
 
           const body = await readBody(req);
-          const now = Date.now();
           if (body.plan && typeof body.plan === 'object') {
             const what = String(body.plan.what || '').trim().slice(0, 80);
             const whenTxt = String(body.plan.when || '').trim().slice(0, 40);
             if (!what || !whenTxt) return json(res, 400, { error: 'Plan requires what and when' });
 
             const info = db.prepare('INSERT INTO messages (group_id, user_id, sys, plan_what, plan_when, created_at) VALUES (?, ?, 0, ?, ?, ?)').run(
-              groupId, currentUserId, what, whenTxt, now
+              groupId, currentUserId, what, whenTxt, nowTs
             );
             db.prepare('INSERT INTO plan_participants (message_id, user_id) VALUES (?, ?)').run(Number(info.lastInsertRowid), currentUserId);
-            return json(res, 201, getFullState(db, currentUserId));
+            broadcast({ type: 'state_changed', groupId });
+            return json(res, 201, getFullState(db, currentUserId, nowTs));
           }
 
           const text = String(body.text || '').trim().slice(0, 400);
           if (!text) return json(res, 400, { error: 'Message text is required' });
           db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 0, ?, ?)').run(
-            groupId, currentUserId, text, now
+            groupId, currentUserId, text, nowTs
           );
-          return json(res, 201, getFullState(db, currentUserId));
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 201, getFullState(db, currentUserId, nowTs));
         }
 
         if (action === 'waitlist' && method === 'POST') {
@@ -331,9 +510,10 @@ export function createApp(db) {
           } else {
             const memberCount = db.prepare('SELECT COUNT(*) AS c FROM memberships WHERE group_id = ?').get(groupId).c;
             if (memberCount < group.size) return json(res, 400, { error: 'Group is not full — you can join directly' });
-            db.prepare('INSERT INTO waitlist (group_id, user_id, joined_at) VALUES (?, ?, ?)').run(groupId, currentUserId, Date.now());
+            db.prepare('INSERT INTO waitlist (group_id, user_id, joined_at) VALUES (?, ?, ?)').run(groupId, currentUserId, nowTs);
           }
-          return json(res, 200, getFullState(db, currentUserId));
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 200, getFullState(db, currentUserId, nowTs));
         }
 
         if (action === 'rate' && method === 'POST') {
@@ -343,16 +523,12 @@ export function createApp(db) {
           const body = await readBody(req);
           if (body.rating !== 1 && body.rating !== -1) return json(res, 400, { error: 'Rating must be 1 or -1' });
 
-          // Validate: within 6 hours after meetup end
-          const parsed = { ...group, weekly: Boolean(group.weekly), lang: JSON.parse(group.lang) };
-          const sess = nextSessionFromGroup(parsed);
-          const endTs = sess.getTime() + group.duration * 60000;
-          const now = Date.now();
-          const sinceEnd = now - endTs;
-          if (sinceEnd < 0 || sinceEnd > 6 * 3600000) {
+          if (!isInRatingWindow(group, nowTs)) {
             return json(res, 400, { error: 'Rating only allowed within 6 hours after the meetup ends' });
           }
 
+          const lastSess = lastSessionDate(group, nowTs);
+          const endTs = lastSess.getTime() + group.duration * 60000;
           const weekTs = getMondayTs(endTs);
           db.prepare(`
             INSERT INTO meetup_ratings (group_id, user_id, week_ts, rating)
@@ -360,20 +536,24 @@ export function createApp(db) {
             ON CONFLICT(group_id, user_id, week_ts) DO UPDATE SET rating = excluded.rating
           `).run(groupId, currentUserId, weekTs, body.rating);
 
-          return json(res, 200, getFullState(db, currentUserId));
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 200, getFullState(db, currentUserId, nowTs));
         }
 
         if (action === 'pause' && method === 'POST') {
-          if (group.host !== currentUserId) return json(res, 403, { error: 'Only the host can pause the group' });
-          const isPaused = group.paused_until && new Date(group.paused_until) > new Date();
+          if (group.host !== currentUserId && group.coHost !== currentUserId) {
+            return json(res, 403, { error: 'Only the host can pause the group' });
+          }
+          const isPaused = group.pausedUntil && new Date(group.pausedUntil) > new Date(nowTs);
           if (isPaused) {
             db.prepare('UPDATE groups SET paused_until = NULL WHERE id = ?').run(groupId);
           } else {
-            const twoWeeks = new Date();
+            const twoWeeks = new Date(nowTs);
             twoWeeks.setDate(twoWeeks.getDate() + 14);
-            db.prepare('UPDATE groups SET paused_until = ? WHERE id = ?').run(twoWeeks.toISOString().slice(0, 10), groupId);
+            db.prepare('UPDATE groups SET paused_until = ? WHERE id = ?').run(ymd(twoWeeks), groupId);
           }
-          return json(res, 200, getFullState(db, currentUserId));
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 200, getFullState(db, currentUserId, nowTs));
         }
 
         if (action === 'transfer' && method === 'POST') {
@@ -386,11 +566,13 @@ export function createApp(db) {
           const targetUser = db.prepare('SELECT name FROM users WHERE id = ?').get(newHostId);
           if (!targetUser) return json(res, 404, { error: 'User not found' });
 
-          db.prepare('UPDATE groups SET host = ? WHERE id = ?').run(newHostId, groupId);
+          db.prepare('UPDATE groups SET host = ?, co_host = CASE WHEN co_host = ? THEN NULL ELSE co_host END WHERE id = ?')
+            .run(newHostId, newHostId, groupId);
           db.prepare('INSERT INTO messages (group_id, user_id, sys, text, created_at) VALUES (?, ?, 1, ?, ?)').run(
-            groupId, null, `${targetUser.name} is now hosting the group.`, Date.now()
+            groupId, null, `${targetUser.name} is now hosting the group.`, nowTs
           );
-          return json(res, 200, getFullState(db, currentUserId));
+          broadcast({ type: 'state_changed', groupId });
+          return json(res, 200, getFullState(db, currentUserId, nowTs));
         }
 
         if (action === 'kick' && method === 'POST') {
@@ -437,7 +619,8 @@ export function createApp(db) {
         } else {
           db.prepare('INSERT INTO plan_participants (message_id, user_id) VALUES (?, ?)').run(msgId, currentUserId);
         }
-        return json(res, 200, getFullState(db, currentUserId));
+        broadcast({ type: 'state_changed', groupId });
+        return json(res, 200, getFullState(db, currentUserId, nowTs));
       }
 
       const friendMatch = path.match(/^\/api\/friends\/([a-z0-9_-]+)\/toggle$/i);
@@ -451,14 +634,24 @@ export function createApp(db) {
         if (existing) {
           db.prepare('DELETE FROM friendships WHERE user_id = ? AND friend_id = ?').run(currentUserId, targetId);
         } else {
-          db.prepare('INSERT INTO friendships (user_id, friend_id, created_at) VALUES (?, ?, ?)').run(currentUserId, targetId, Date.now());
+          db.prepare('INSERT INTO friendships (user_id, friend_id, created_at) VALUES (?, ?, ?)').run(currentUserId, targetId, nowTs);
+          const me = getUser(db, currentUserId);
+          createNotification(db, {
+            userId: targetId,
+            type: 'friend_added',
+            title: `${me?.name || 'Someone'} added you as a familiar face`,
+            body: 'You can now join each other’s friends-only meetups.',
+            link: '#profile'
+          });
         }
-        return json(res, 200, getFullState(db, currentUserId));
+        broadcast({ type: 'state_changed' });
+        return json(res, 200, getFullState(db, currentUserId, nowTs));
       }
 
       if (path === '/api/reset' && method === 'POST') {
         seedDatabase(db);
-        return json(res, 200, getFullState(db, 'me'));
+        broadcast({ type: 'state_changed' });
+        return json(res, 200, getFullState(db, 'me', nowTs));
       }
 
       // Static files
@@ -485,7 +678,16 @@ export function createApp(db) {
     } catch (err) {
       return json(res, 500, { error: err.message || 'Internal server error' });
     }
+  }
+
+  handler.closeSse = () => {
+    for (const client of sseClients) {
+      try { client.end(); } catch {}
+    }
+    sseClients.clear();
   };
+
+  return handler;
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
