@@ -48,6 +48,8 @@ const ui = {
   sheetQuery: '',
   startLat: null,
   startLng: null,
+  editLat: null,
+  editLng: null,
   profileLat: null,
   profileLng: null,
   onboarding: null
@@ -494,7 +496,7 @@ function groupView(g) {
         ${isHostOrCoHost(g) ? `<div class="host-actions">
           <button type="button" class="btn btn-secondary btn-sm" data-act="pause" data-id="${g.id}" data-key="pause-btn">${svg('clock', 14)}${isPaused(g) ? 'Resume group' : 'Pause for 2 weeks'}</button>
           <button type="button" class="btn btn-secondary btn-sm" data-act="toggle-host-notes" data-id="${g.id}">Edit icebreaker &amp; tips</button>
-          ${g.host === state.me.id ? `<button type="button" class="btn btn-secondary btn-sm" data-act="cohost" data-id="${g.id}">Set co-host</button><button type="button" class="btn btn-secondary btn-sm" data-act="transfer" data-id="${g.id}" data-key="transfer-btn">${svg('users', 14)}Transfer hosting</button>` : ''}
+          ${g.host === state.me.id ? `<a class="btn btn-secondary btn-sm" href="#edit-group-${g.id}">${svg('edit', 14)}Edit group</a><button type="button" class="btn btn-secondary btn-sm" data-act="cohost" data-id="${g.id}">Set co-host</button><button type="button" class="btn btn-secondary btn-sm" data-act="transfer" data-id="${g.id}" data-key="transfer-btn">${svg('users', 14)}Transfer hosting</button>` : ''}
         </div>${hostEditForm}` : ''}
       </section>`
     : `<section class="panel g-act" aria-labelledby="act-h">
@@ -819,13 +821,140 @@ function updatePreview() {
   if (p && g) p.innerHTML = cardHTML(g, true);
 }
 
+function formEditGroup(g) {
+  const f = document.getElementById('edit-form');
+  if (!f) return null;
+  const fd = new FormData(f);
+  const paid = fd.get('cost') === 'paid';
+  const langsPicked = fd.getAll('lang');
+  const lat = ui.editLat || g.lat;
+  const lng = ui.editLng || g.lng;
+  let area = g.area;
+  let bestD = Infinity;
+  for (const [name, [aLat, aLng]] of Object.entries(AREAS)) {
+    const d = (lat - aLat) ** 2 + (lng - aLng) ** 2;
+    if (d < bestD) { bestD = d; area = name; }
+  }
+  return {
+    id: 'preview', name: String(fd.get('name') || '').trim() || g.name,
+    cat: g.cat, desc: String(fd.get('desc') || '').trim() || g.desc,
+    date: fd.get('date') || g.date, time: fd.get('time') || g.time,
+    duration: Number(fd.get('duration')) || g.duration, weekly: fd.get('weekly') === 'on',
+    place: String(fd.get('place') || '').trim() || g.place, area, lat, lng,
+    spot: String(fd.get('spot') || '').trim() || g.spot,
+    lang: langsPicked.length ? langsPicked : g.lang,
+    cost: paid ? Math.max(1, Math.min(50, Number(fd.get('amount')) || 5)) : 0,
+    size: Number(fd.get('size')) || g.size, friendsOnly: fd.get('friendsOnly') === 'on',
+    host: state.me.id, members: g.members, rsvp: g.rsvp,
+    distKm: g.distKm, matchedInterestCount: g.matchedInterestCount, chat: g.chat
+  };
+}
+
+function updateEditPreview() {
+  const p = document.getElementById('e-preview');
+  const r = route();
+  if (r.name !== 'edit-group' || !r.g) return;
+  const g = formEditGroup(r.g);
+  if (p && g) p.innerHTML = cardHTML(g, true);
+}
+
+function editGroupView(g) {
+  return `<a class="back" href="#group-${g.id}">${svg('back', 18)}Back to group</a>
+  <div class="page-head"><h1 tabindex="-1">Edit group</h1><p class="lead">Changes are visible to all members immediately.</p></div>
+  <div class="form-layout">
+    <form id="edit-form" data-id="${g.id}" novalidate>
+      <fieldset><legend>What you'll do</legend>
+        <div class="field"><label for="e-name">Group name</label><input type="text" id="e-name" name="name" maxlength="60" value="${esc(g.name)}" required></div>
+        <div class="field"><label for="e-desc">A line about it <span class="hint">(optional)</span></label><textarea id="e-desc" name="desc" maxlength="200">${esc(g.desc)}</textarea></div>
+      </fieldset>
+      <fieldset><legend>When</legend>
+        <div class="row2">
+          <div class="field"><label for="e-date">Next meetup date</label><input type="date" id="e-date" name="date" min="${ymd(new Date())}" value="${g.date}" required></div>
+          <div class="field"><label for="e-time">Start time</label><input type="time" id="e-time" name="time" value="${g.time}" required></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label for="e-dur">Duration</label><select class="input" id="e-dur" name="duration">${[30,45,60,90,120].map(m=>`<option value="${m}"${m===g.duration?' selected':''}>${m} minutes</option>`).join('')}</select></div>
+          <div class="field"><span class="label">Repeat</span><label class="check-row" for="e-weekly"><input type="checkbox" id="e-weekly" name="weekly"${g.weekly?' checked':''}>Every week, same time</label></div>
+        </div>
+      </fieldset>
+      <fieldset><legend>Where</legend>
+        <div class="field"><label for="e-place">Meeting place name</label><input type="text" id="e-place" name="place" maxlength="60" value="${esc(g.place)}" required autocomplete="off"></div>
+        <div class="loc-search-row"><input type="text" id="e-loc-search" class="input" placeholder="Search for the address or place…" autocomplete="off"><button type="button" id="e-loc-btn" class="btn btn-secondary">Search</button></div>
+        <ul id="e-loc-results" class="loc-results" hidden></ul>
+        <div id="e-loc-map" style="height:240px;border-radius:var(--r-md);border:1px solid var(--line);overflow:hidden;margin:8px 0 4px;"></div>
+        <input type="hidden" id="e-lat" name="lat" value="${g.lat}"><input type="hidden" id="e-lng" name="lng" value="${g.lng}">
+        <div class="field"><label for="e-spot">How will people find you? <span class="hint">(optional)</span></label><input type="text" id="e-spot" name="spot" maxlength="90" value="${esc(g.spot)}"><span class="hint">Members see this after they join.</span></div>
+      </fieldset>
+      <fieldset><legend>Who it's for</legend>
+        <div class="field"><span class="label" id="e-lang-l">Languages spoken</span><div class="toggles" role="group" aria-labelledby="e-lang-l">${LANGS.map(l=>`<label class="toggle"><input type="checkbox" name="lang" value="${l}"${g.lang.includes(l)?' checked':''}><span>${l}</span></label>`).join('')}</div></div>
+        <div class="row2">
+          <div class="field"><span class="label" id="e-cost-l">Cost</span><div class="toggles" role="radiogroup" aria-labelledby="e-cost-l"><label class="toggle"><input type="radio" name="cost" value="free"${g.cost===0?' checked':''}><span>Free</span></label><label class="toggle"><input type="radio" name="cost" value="paid"${g.cost>0?' checked':''}><span>Small cost</span></label></div></div>
+          <div class="field" id="e-amount-wrap"${g.cost===0?' hidden':''}><label for="e-amount">Euros per meetup</label><input type="number" id="e-amount" name="amount" min="1" max="50" step="1" value="${g.cost>0?g.cost:5}"></div>
+        </div>
+        <div class="field"><label for="e-size">Group size</label><select class="input" id="e-size" name="size">${[3,4,5,6,7,8,10,12].map(n=>`<option value="${n}"${n===g.size?' selected':''}>${n} people</option>`).join('')}</select><span class="hint">Can't go below current member count (${g.members.length}).</span></div>
+        <div class="field"><label class="check-row" for="e-friends-only"><input type="checkbox" id="e-friends-only" name="friendsOnly"${g.friendsOnly?' checked':''}>Friends-only</label></div>
+      </fieldset>
+      <div class="form-actions"><button class="btn btn-primary" type="submit">${svg('check', 16)}Save changes</button><a class="btn btn-secondary" href="#group-${g.id}">Cancel</a></div>
+    </form>
+    <div class="preview-col"><span class="label">Preview</span><div id="e-preview"></div><p class="hint">How your group appears in Discover.</p></div>
+  </div>`;
+}
+
+function peopleView() {
+  const me = state.me;
+  const friendSet = new Set(state.friends);
+  const myGroupIds = new Set(joinedGroups().map(g => g.id));
+
+  const others = Object.values(state.people).filter(p => p.id !== me.id);
+  const scored = others.map(p => {
+    const sharedGroups = state.groups.filter(g => myGroupIds.has(g.id) && g.members.includes(p.id));
+    const sharedInterests = me.interests.filter(i => p.interests.includes(i));
+    const isFriend = friendSet.has(p.id);
+    let score = 0;
+    if (isFriend) score += 100;
+    score += sharedGroups.length * 30;
+    score += sharedInterests.length * 10;
+    if (p.newHere) score += 5;
+    if (p.area === me.area) score += 8;
+    return { p, sharedGroups, sharedInterests, isFriend, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  const inMyGroups = scored.filter(x => x.sharedGroups.length > 0);
+  const newHereMatch = scored.filter(x => !x.sharedGroups.length && (x.p.newHere || x.sharedInterests.length > 0));
+  const rest = scored.filter(x => !x.sharedGroups.length && !x.p.newHere && !x.sharedInterests.length);
+
+  function personCard({ p, sharedGroups, sharedInterests, isFriend }) {
+    const friendBtn = `<button type="button" class="btn btn-sm ${isFriend ? 'btn-going' : 'btn-secondary'}" data-act="toggle-friend" data-uid="${p.id}">${svg('heart', 14)}${isFriend ? 'Familiar face' : 'Add'}</button>`;
+    const groupLine = sharedGroups.length ? `<span class="muted" style="font-size:13px">${sharedGroups.map(g => esc(g.name)).join(' · ')}</span>` : '';
+    const interestLine = sharedInterests.length ? `<div class="tags" style="margin-top:4px">${sharedInterests.slice(0,3).map(i=>`<span class="tag" style="font-size:12px">${esc(i)}</span>`).join('')}</div>` : '';
+    return `<li class="member people-card">
+      <button type="button" class="member-btn" data-act="profile" data-uid="${p.id}">
+        ${avatar(p.id)}<span class="member-text"><strong>${esc(p.name)}${p.verified?`<span class="badge-verified">${svg('shield',11)}Verified</span>`:''}${p.newHere?'<span class="badge-new">New here</span>':''}</strong><span>${esc(p.since)} · ${esc(p.area)}</span>${groupLine}</span>
+      </button>${interestLine}<div class="people-actions">${friendBtn}</div></li>`;
+  }
+
+  function section(title, subtitle, items) {
+    if (!items.length) return '';
+    const slug = title.replace(/\W/g,'');
+    return `<section class="panel" aria-labelledby="ph-${slug}"><div class="h-row"><h2 id="ph-${slug}">${title}</h2><span class="muted">${subtitle}</span></div><ul class="members">${items.map(personCard).join('')}</ul></section>`;
+  }
+
+  return `<div class="page-head"><h1 tabindex="-1">People</h1><p class="lead">Others in Heidelberg — in your groups, new here, or sharing your interests.</p></div>
+  <div class="people-layout">
+    ${section('In your groups', `${inMyGroups.length} people`, inMyGroups)}
+    ${section('New here & matching interests', `${newHereMatch.length} people`, newHereMatch)}
+    ${rest.length ? section('Everyone else', `${rest.length} people`, rest) : ''}
+  </div>`;
+}
+
 /* Router & Render */
 const NAV = [
   ['discover', 'compass', 'Discover', 'Discover'],
   ['my-groups', 'users', 'My groups', 'My groups'],
+  ['people', 'heart', 'People', 'People'],
   ['calendar', 'calendar', 'Calendar', 'Calendar'],
   ['profile', 'user', 'Profile', 'Profile'],
-  ['start-group', 'plus', 'Start a group', 'Start']
 ];
 
 function route() {
@@ -834,7 +963,12 @@ function route() {
     const g = byId(h.slice(6));
     if (g) return { name: 'group', g };
   }
-  return { name: ['my-groups', 'calendar', 'profile', 'start-group'].includes(h) ? h : 'discover' };
+  if (h.startsWith('edit-group-')) {
+    const g = byId(h.slice(11));
+    if (g && g.host === state.me?.id) return { name: 'edit-group', g };
+    return { name: 'discover' };
+  }
+  return { name: ['my-groups', 'people', 'calendar', 'profile', 'start-group'].includes(h) ? h : 'discover' };
 }
 
 const main = document.getElementById('main');
@@ -858,12 +992,12 @@ function render() {
   const r = route();
   const key = r.name + (r.g ? r.g.id : '');
   const changed = key !== lastKey;
-  if (changed) { ui.leave = false; ui.plan = false; ui.editHostNotes = false; }
+  if (changed) { ui.leave = false; ui.plan = false; ui.editHostNotes = false; ui.deleteConfirm = false; ui.kickConfirm = null; }
 
   const active = document.activeElement;
   const focusKey = !changed && active && active.dataset ? active.dataset.key : null;
   const n = joinedGroups().length;
-  const navTab = r.name === 'group' ? 'discover' : r.name;
+  const navTab = r.name === 'group' || r.name === 'edit-group' ? 'discover' : r.name;
 
   document.getElementById('nav').innerHTML = NAV.map(([id, icon, long, short]) =>
     `<a href="#${id}" class="${id === 'start-group' ? 'nav-start' : ''}"${id === navTab ? ' aria-current="page"' : ''}>${svg(icon, 18)}<span class="lbl-long">${long}</span><span class="lbl-short">${short}</span>${id === 'my-groups' && n ? `<span class="nav-count" aria-label="${n} joined">${n}</span>` : ''}</a>`
@@ -871,7 +1005,9 @@ function render() {
   renderTopUtils();
 
   main.innerHTML = r.name === 'group' ? groupView(r.g)
+    : r.name === 'edit-group' ? editGroupView(r.g)
     : r.name === 'my-groups' ? myGroupsView()
+    : r.name === 'people' ? peopleView()
     : r.name === 'calendar' ? calendarView()
     : r.name === 'profile' ? profileView()
     : r.name === 'start-group' ? startView()
@@ -879,6 +1015,7 @@ function render() {
 
   document.title = r.name === 'group' ? `${r.g.name} · Common` : 'Common';
   if (r.name === 'start-group' && changed) updatePreview();
+  if (r.name === 'edit-group' && changed) updateEditPreview();
 
   const chatList = document.getElementById('chat-list');
   if (chatList) chatList.scrollTop = chatList.scrollHeight;
@@ -929,6 +1066,22 @@ function render() {
         if (latEl) latEl.value = lat;
         if (lngEl) lngEl.value = lng;
         if (city && cityEl) cityEl.value = city;
+      }
+    });
+  } else if (r.name === 'edit-group' && changed) {
+    ui.editLat = r.g.lat;
+    ui.editLng = r.g.lng;
+    initLocationPicker('e-loc-map', {
+      lat: r.g.lat,
+      lng: r.g.lng,
+      onLocation: (lat, lng) => {
+        ui.editLat = lat;
+        ui.editLng = lng;
+        const latEl = document.getElementById('e-lat');
+        const lngEl = document.getElementById('e-lng');
+        if (latEl) latEl.value = lat;
+        if (lngEl) lngEl.value = lng;
+        updateEditPreview();
       }
     });
   } else if (r.name === 'profile' && changed) {
@@ -1381,12 +1534,20 @@ document.addEventListener('change', e => {
     if (t.name === 'cost') document.getElementById('amount-wrap').hidden = t.value !== 'paid';
     updatePreview();
   }
+  if (t.closest('#edit-form')) {
+    if (t.name === 'cost') document.getElementById('e-amount-wrap').hidden = t.value !== 'paid';
+    updateEditPreview();
+  }
 });
 
 document.addEventListener('input', e => {
   if (e.target.closest('#start-form')) {
     if (e.target.setCustomValidity) e.target.setCustomValidity('');
     updatePreview();
+  }
+  if (e.target.closest('#edit-form')) {
+    if (e.target.setCustomValidity) e.target.setCustomValidity('');
+    updateEditPreview();
   }
 });
 
@@ -1454,6 +1615,15 @@ document.addEventListener('submit', async e => {
       mergeState(res.state);
       location.hash = 'group-' + res.id;
       toast("Group started. You're the host.");
+    } else if (f.id === 'edit-form') {
+      for (const id of ['e-name', 'e-place']) {
+        const el = document.getElementById(id);
+        if (el && !el.value.trim()) { el.setCustomValidity('Please fill this in.'); el.reportValidity(); return; }
+      }
+      const g = formEditGroup(route().g);
+      mergeState(await api(`/api/groups/${encodeURIComponent(f.dataset.id)}`, { method: 'PATCH', body: JSON.stringify(g) }));
+      location.hash = 'group-' + f.dataset.id;
+      toast('Group updated.');
     } else if (f.id === 'profile-form') {
       const fd = new FormData(f);
       mergeState(await api('/api/me', {

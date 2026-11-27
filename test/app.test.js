@@ -115,8 +115,8 @@ test('API lifecycle: join, RSVP, arrival note, welcome buddy, chat, co-host, wai
   const db = createDb(':memory:');
   const app = createApp(db);
   try {
-    // 1. Join 'run' and RSVP going
-    const joinRes = await invokeApp(app, { method: 'POST', url: '/api/groups/run/join', userId: 'me' });
+    // 1. Join 'sketch' (me is not pre-seeded there) and confirm showIntro, then RSVP on 'run'
+    const joinRes = await invokeApp(app, { method: 'POST', url: '/api/groups/sketch/join', userId: 'me' });
     assert.equal(joinRes.status, 200);
     assert.equal(joinRes.data.showIntro, true);
 

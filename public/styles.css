@@ -500,3 +500,10 @@ dialog.onboarding-dialog::backdrop { background: var(--backdrop); backdrop-filte
   .account-pill span:last-child { display: none; }
   .account-pill { padding: 4px; }
 }
+
+/* ── People view ── */
+.people-layout { display: flex; flex-direction: column; gap: 20px; }
+.people-card { flex-direction: column; align-items: flex-start; gap: 6px; padding-block: 14px; }
+.people-card .member-btn { width: 100%; }
+.people-actions { display: flex; padding-left: calc(40px + 12px); }
+.people-card .tags { padding-left: calc(40px + 12px); }

@@ -67,8 +67,8 @@ export const SEED_GROUPS = [
     tips: 'Slow conversational pace (~6:30/km). Bring water if you want; we stretch by the bridge.',
     icebreaker: 'What is one neighbourhood in Heidelberg you haven’t explored yet?',
     lang: ['English'], langLevel: 'all', cost: 0, size: 6, host: 'lena', coHost: 'kofi', friendsOnly: false,
-    members: ['lena', 'kofi', 'sofia'],
-    rsvp: { lena: 'going', kofi: 'going', sofia: 'skip' },
+    members: ['lena', 'kofi', 'sofia', 'me'],
+    rsvp: { lena: 'going', kofi: 'going', sofia: 'skip', me: 'going' },
     welcomeBuddy: 'kofi',
     pastWeeks: [
       { weeksAgo: 1, attendees: ['lena', 'kofi', 'sofia'] },
@@ -77,7 +77,9 @@ export const SEED_GROUPS = [
     lat: 49.4147, lng: 8.6978,
     chat: [
       { from: 'lena', text: 'Welcome Kofi! We keep it slow, so nobody gets left behind.' },
-      { from: 'kofi', text: 'Perfect, that is exactly my speed. See you Tuesday!' }
+      { from: 'kofi', text: 'Perfect, that is exactly my speed. See you Tuesday!' },
+      { sys: true, text: 'Alex joined the group.' },
+      { from: 'lena', text: 'Hey Alex! Great to have you. See you Tuesday evening at the river.' }
     ]
   },
   {

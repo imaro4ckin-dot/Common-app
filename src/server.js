@@ -290,7 +290,7 @@ export function createApp(db, opts = {}) {
         return json(res, 200, getFullState(db, currentUserId, nowTs));
       }
 
-      // Host/Co-host group details patch (icebreaker, tips, coHost, spot)
+      // Host/Co-host group details patch
       const groupPatchMatch = path.match(/^\/api\/groups\/([a-z0-9_-]+)$/i);
       if (groupPatchMatch && method === 'PATCH') {
         const groupId = groupPatchMatch[1];
@@ -301,6 +301,8 @@ export function createApp(db, opts = {}) {
         }
 
         const body = await readBody(req);
+
+        // Operational fields (host + co-host)
         const icebreaker = typeof body.icebreaker === 'string' ? body.icebreaker.trim().slice(0, 140) : group.icebreaker;
         const tips = typeof body.tips === 'string' ? body.tips.trim().slice(0, 200) : group.tips;
         const spot = typeof body.spot === 'string' && body.spot.trim() ? body.spot.trim().slice(0, 90) : group.spot;
@@ -313,8 +315,38 @@ export function createApp(db, opts = {}) {
           coHost = body.coHost;
         }
 
-        db.prepare('UPDATE groups SET icebreaker = ?, tips = ?, spot = ?, co_host = ? WHERE id = ?')
-          .run(icebreaker, tips, spot, coHost, groupId);
+        // Full group edit fields (host only)
+        let name = group.name, desc = group.desc, place = group.place, area = group.area, city = group.city;
+        let date = group.date, time = group.time, duration = group.duration, weekly = group.weekly;
+        let lang = group.lang, langLevel = group.lang_level, cost = group.cost, size = group.size;
+        let friendsOnly = group.friends_only, lat = group.lat, lng = group.lng;
+
+        if (group.host === currentUserId && body.name !== undefined) {
+          const memberCount = db.prepare('SELECT COUNT(*) AS c FROM memberships WHERE group_id = ?').get(groupId).c;
+          if (typeof body.name === 'string' && body.name.trim()) name = body.name.trim().slice(0, 60);
+          if (typeof body.desc === 'string') desc = body.desc.trim().slice(0, 200);
+          if (typeof body.place === 'string' && body.place.trim()) place = body.place.trim().slice(0, 60);
+          if (typeof body.area === 'string' && body.area.trim()) area = body.area.trim();
+          if (typeof body.city === 'string' && body.city.trim()) city = body.city.trim().slice(0, 60);
+          if (typeof body.date === 'string' && body.date.trim()) date = body.date.trim();
+          if (typeof body.time === 'string' && body.time.trim()) time = body.time.trim();
+          if (typeof body.duration === 'number') duration = Math.max(15, Math.min(360, body.duration));
+          if (typeof body.weekly === 'boolean') weekly = body.weekly ? 1 : 0;
+          if (Array.isArray(body.lang) && body.lang.length) lang = JSON.stringify(body.lang);
+          if (typeof body.langLevel === 'string') langLevel = body.langLevel;
+          if (typeof body.cost === 'number') cost = Math.max(0, Math.min(50, body.cost));
+          if (typeof body.size === 'number') size = Math.max(memberCount, Math.min(20, body.size));
+          if (typeof body.friendsOnly === 'boolean') friendsOnly = body.friendsOnly ? 1 : 0;
+          if (typeof body.lat === 'number' && typeof body.lng === 'number') { lat = body.lat; lng = body.lng; }
+        }
+
+        db.prepare(`UPDATE groups SET
+          name=?, desc=?, place=?, area=?, city=?, date=?, time=?, duration=?, weekly=?,
+          lang=?, lang_level=?, cost=?, size=?, friends_only=?, lat=?, lng=?,
+          icebreaker=?, tips=?, spot=?, co_host=? WHERE id=?`)
+          .run(name, desc, place, area, city, date, time, duration, weekly,
+               lang, langLevel, cost, size, friendsOnly, lat, lng,
+               icebreaker, tips, spot, coHost, groupId);
         broadcast({ type: 'state_changed', groupId });
         return json(res, 200, getFullState(db, currentUserId, nowTs));
       }
